@@ -1,0 +1,762 @@
+#!/usr/bin/env python3
+# Program Timeline Generator
+"""Generate a weekly HTML Gantt chart from a CSV of projects and milestones."""
+
+import argparse
+import csv
+import json
+import os
+import re
+import sys
+from datetime import date, timedelta
+
+HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Program Timeline — {week_label}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.css">
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f7fa;
+      margin: 0;
+      padding: 24px;
+    }}
+    h1 {{
+      font-size: 1.4rem;
+      color: #1a1a2e;
+      margin-bottom: 4px;
+    }}
+    .subtitle {{
+      font-size: 0.85rem;
+      color: #6b7280;
+      margin-bottom: 24px;
+    }}
+    .legend {{
+      display: flex;
+      gap: 20px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }}
+    .legend-item {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.85rem;
+      color: #374151;
+    }}
+    .legend-dot {{
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+    }}
+    .toolbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 16px;
+    }}
+    .view-toggle {{
+      display: flex;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      overflow: hidden;
+    }}
+    .view-toggle button {{
+      padding: 6px 18px;
+      font-size: 0.85rem;
+      font-family: inherit;
+      border: none;
+      background: #fff;
+      color: #374151;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }}
+    .view-toggle button:not(:last-child) {{
+      border-right: 1px solid #d1d5db;
+    }}
+    .view-toggle button.active {{
+      background: #1a1a2e;
+      color: #fff;
+    }}
+    .zoom-controls {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }}
+    .zoom-controls button {{
+      width: 30px;
+      height: 30px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: #fff;
+      color: #374151;
+      font-size: 1.1rem;
+      line-height: 1;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s, color 0.15s;
+    }}
+    .zoom-controls button:hover {{
+      background: #f3f4f6;
+    }}
+    .zoom-controls .fit-btn {{
+      width: auto;
+      padding: 0 10px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }}
+    .zoom-level {{
+      font-size: 0.8rem;
+      color: #6b7280;
+      min-width: 36px;
+      text-align: center;
+    }}
+    .export-btn {{
+      padding: 6px 14px;
+      font-size: 0.85rem;
+      font-family: inherit;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: #fff;
+      color: #374151;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }}
+    .export-btn:hover {{ background: #f3f4f6; }}
+    .export-btn:disabled {{ opacity: 0.5; cursor: default; }}
+    .date-toggle {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.85rem;
+      color: #374151;
+      cursor: pointer;
+      user-select: none;
+    }}
+    .date-toggle input {{ cursor: pointer; }}
+    .date-fmt-toggle {{
+      display: flex;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      overflow: hidden;
+    }}
+    .date-fmt-toggle button {{
+      padding: 4px 10px;
+      font-size: 0.78rem;
+      font-family: inherit;
+      border: none;
+      background: #fff;
+      color: #374151;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }}
+    .date-fmt-toggle button:not(:last-child) {{
+      border-right: 1px solid #d1d5db;
+    }}
+    .date-fmt-toggle button.active {{
+      background: #1a1a2e;
+      color: #fff;
+    }}
+    #gantt-container {{
+      background: #fff;
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      overflow-x: auto;
+    }}
+    /* Project color classes applied to Frappe Gantt bars */
+    .project-a .bar {{ fill: #3b82f6 !important; }}
+    .project-a .bar-progress {{ fill: #1d4ed8 !important; }}
+    .project-b .bar {{ fill: #10b981 !important; }}
+    .project-b .bar-progress {{ fill: #047857 !important; }}
+    .project-c .bar {{ fill: #f59e0b !important; }}
+    .project-c .bar-progress {{ fill: #b45309 !important; }}
+    .gantt .bar-label {{ fill: #fff !important; font-size: 12px; }}
+    .gantt .bar-label.big {{ fill: #374151 !important; }}
+    .gantt-container .lower-text {{ font-size: 11px; }}
+    /* Milestones: hide everything Frappe renders; JS draws diamond + label */
+    .is-milestone .bar-group {{ display: none; }}
+    .is-milestone .handle-group {{ display: none; }}
+  </style>
+</head>
+<body>
+  <h1>Program Timeline</h1>
+  <p class="subtitle">{week_label}</p>
+  <div class="toolbar">
+    <div class="legend">{legend_html}</div>
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <div class="view-toggle">
+        <button id="btn-week" class="active" onclick="setView('Week')">Week</button>
+        <button id="btn-month" onclick="setView('Month')">Month</button>
+      </div>
+      <div class="zoom-controls">
+        <button onclick="adjustZoom(-1)" title="Zoom out">−</button>
+        <span class="zoom-level" id="zoom-label">100%</span>
+        <button onclick="adjustZoom(+1)" title="Zoom in">+</button>
+        <button class="fit-btn" onclick="fitToScreen()" title="Fit all tasks to screen">Fit</button>
+      </div>
+      <label class="date-toggle">
+        <input type="checkbox" id="show-dates" checked onchange="toggleDates()">
+        Show dates
+      </label>
+      <div class="date-fmt-toggle" id="date-fmt-toggle">
+        <button id="btn-fmt-short" class="active" onclick="setDateFmt('short')">MM-DD</button>
+        <button id="btn-fmt-full"  onclick="setDateFmt('full')">YYYY-MM-DD</button>
+      </div>
+      <button class="export-btn" id="export-btn" onclick="exportPng()">Export PNG</button>
+    </div>
+  </div>
+  <div id="gantt-container">
+    <svg id="gantt"></svg>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.min.js"></script>
+  <script>
+    const tasks = {gantt_json};
+    const PROJECT_LEGEND = {legend_json};
+    const WEEK_LABEL = {week_label_json};
+
+    // Zoom state: multiplier applied to column_width after Frappe sets its default.
+    // Steps are spaced ~25% apart; index 4 = 100% (1×).
+    const ZOOM_STEPS = [0.25, 0.4, 0.6, 0.8, 1.0, 1.33, 1.75, 2.25, 3.0];
+    let zoomIndex = 4; // start at 1.0×
+
+    const _origUpdateViewScale = Gantt.prototype.update_view_scale;
+    Gantt.prototype.update_view_scale = function(view_mode) {{
+      _origUpdateViewScale.call(this, view_mode);
+      this.options.column_width = Math.round(this.options.column_width * ZOOM_STEPS[zoomIndex]);
+    }};
+
+    // Override Frappe's date-padding logic so the chart starts at the first
+    // task's week (Week view) or month (Month view) instead of 1 month / 1 year earlier.
+    const _origSetupGanttDates = Gantt.prototype.setup_gantt_dates;
+    Gantt.prototype.setup_gantt_dates = function() {{
+      _origSetupGanttDates.call(this);
+      const oldest = this.get_oldest_starting_date();
+      if (this.view_is('Month')) {{
+        this.gantt_start = new Date(oldest.getFullYear(), oldest.getMonth(), 1);
+      }} else {{
+        // Snap back to Monday of the week containing the first task
+        const d = new Date(oldest);
+        const dayOfWeek = d.getDay(); // 0 = Sunday
+        const daysToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+        this.gantt_start = new Date(d.getFullYear(), d.getMonth(), d.getDate() + daysToMonday);
+      }}
+    }};
+
+    const gantt = new Gantt("#gantt", tasks, {{
+      view_mode: "Week",
+      date_format: "YYYY-MM-DD",
+      popup_trigger: "click",
+      custom_popup_html: function(task) {{
+        return `<div style="padding:8px;font-size:13px">
+          <strong>${{task.name}}</strong><br>
+          <span style="color:#6b7280">${{task.start}} → ${{task.end}}</span>
+        </div>`;
+      }}
+    }});
+
+    // Map project CSS class → fill color (mirrors Python LEGEND_COLORS)
+    const PROJECT_COLORS = {{
+      "project-a": "#3b82f6",
+      "project-b": "#10b981",
+      "project-c": "#f59e0b",
+    }};
+
+    function drawMilestoneDiamonds() {{
+      document.querySelectorAll(".milestone-diamond, .milestone-label").forEach(el => el.remove());
+
+      const svg = gantt.$svg;
+      const HALF = 9;
+
+      tasks.forEach(task => {{
+        if (!task.custom_class.includes("is-milestone")) return;
+
+        const barGroup = svg.querySelector(`.bar-wrapper[data-id="${{task.id}}"]`);
+        if (!barGroup) return;
+
+        // Use compute_x logic: Frappe puts x on the .bar-wrapper transform or
+        // we read it from the Bar instance via gantt.get_bar()
+        const bar = gantt.get_bar(task.id);
+        if (!bar) return;
+
+        const cx = bar.x;
+        const cy = bar.y + bar.height / 2;
+
+        const pts = [
+          `${{cx}},${{cy - HALF}}`,
+          `${{cx + HALF}},${{cy}}`,
+          `${{cx}},${{cy + HALF}}`,
+          `${{cx - HALF}},${{cy}}`,
+        ].join(" ");
+
+        // Determine color from base project class
+        const baseClass = Object.keys(PROJECT_COLORS).find(c => task.custom_class.includes(c));
+        const fill = PROJECT_COLORS[baseClass] || "#374151";
+
+        const diamond = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+        diamond.setAttribute("points", pts);
+        diamond.setAttribute("fill", fill);
+        diamond.setAttribute("stroke", "#fff");
+        diamond.setAttribute("stroke-width", "1.5");
+        diamond.classList.add("milestone-diamond");
+        barGroup.appendChild(diamond);
+
+        // Draw our own label to the right of the diamond
+        const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        label.setAttribute("x", cx + HALF + 5);
+        label.setAttribute("y", cy + 4);
+        label.setAttribute("fill", "#1a1a2e");
+        label.setAttribute("font-size", "11");
+        label.setAttribute("font-weight", "600");
+        label.setAttribute("font-family", "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
+        label.textContent = task.name;
+        label.classList.add("milestone-label");
+        barGroup.appendChild(label);
+      }});
+    }}
+
+    let dateFmt = "short"; // "short" = MM-DD, "full" = YYYY-MM-DD
+
+    function formatDate(isoStr) {{
+      // isoStr is always YYYY-MM-DD
+      return dateFmt === "short" ? isoStr.slice(5) : isoStr;
+    }}
+
+    function setDateFmt(fmt) {{
+      dateFmt = fmt;
+      document.getElementById("btn-fmt-short").classList.toggle("active", fmt === "short");
+      document.getElementById("btn-fmt-full").classList.toggle("active", fmt === "full");
+      drawEndDates();
+    }}
+
+    function toggleDates() {{
+      // Grey out the format toggle when dates are hidden
+      const show = document.getElementById("show-dates").checked;
+      document.getElementById("date-fmt-toggle").style.opacity = show ? "1" : "0.4";
+      document.getElementById("date-fmt-toggle").style.pointerEvents = show ? "" : "none";
+      drawEndDates();
+    }}
+
+    function drawEndDates() {{
+      document.querySelectorAll(".end-date-label").forEach(el => el.remove());
+      if (!document.getElementById("show-dates").checked) return;
+
+      const svg = gantt.$svg;
+
+      tasks.forEach(task => {{
+        const bar = gantt.get_bar(task.id);
+        if (!bar) return;
+
+        const isMilestone = task.custom_class.includes("is-milestone");
+        // For milestones use the original start date (end was bumped +1 day in Python)
+        const dateStr = formatDate(isMilestone ? task.start : task.end);
+
+        const barGroup = svg.querySelector(`.bar-wrapper[data-id="${{task.id}}"]`);
+        if (!barGroup) return;
+
+        const cy = bar.y + bar.height / 2;
+        let tx, ty;
+        if (isMilestone) {{
+          // Position date after the milestone name label on the same baseline.
+          // getBBox() works because drawMilestoneDiamonds already added the label.
+          const nameLabel = barGroup.querySelector(".milestone-label");
+          try {{
+            const bbox = nameLabel.getBBox();
+            tx = bbox.x + bbox.width + 5;
+          }} catch(e) {{
+            tx = bar.x + 9 + 5;
+          }}
+          ty = cy + 4;
+        }} else {{
+          // For regular bars: if the bar label overflows outside the bar (.big),
+          // position the date after the label text rather than after the bar edge.
+          const barLabel = barGroup.querySelector(".bar-label");
+          if (barLabel && barLabel.classList.contains("big")) {{
+            try {{
+              const bbox = barLabel.getBBox();
+              tx = bbox.x + bbox.width + 5;
+            }} catch(e) {{
+              tx = bar.x + bar.width + 4;
+            }}
+          }} else {{
+            tx = bar.x + bar.width + 4;
+          }}
+          ty = cy + 4;
+        }}
+
+        const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        label.setAttribute("x", tx);
+        label.setAttribute("y", ty);
+        label.setAttribute("fill", "#6b7280");
+        label.setAttribute("font-size", "10");
+        label.setAttribute("font-family", "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif");
+        label.textContent = dateStr;
+        label.classList.add("end-date-label");
+        barGroup.appendChild(label);
+      }});
+    }}
+
+    // Run after every Frappe render: diamonds first, then dates in the next
+    // animation frame so getBBox() has valid layout measurements to work with.
+    function afterRender() {{
+      scrollToFirstTask();
+      drawMilestoneDiamonds();
+      requestAnimationFrame(drawEndDates);
+    }}
+
+    function rerender() {{
+      gantt.change_view_mode(gantt.options.view_mode);
+      setTimeout(afterRender, 0);
+    }}
+
+    function adjustZoom(delta) {{
+      zoomIndex = Math.max(0, Math.min(ZOOM_STEPS.length - 1, zoomIndex + delta));
+      document.getElementById("zoom-label").textContent =
+        Math.round(ZOOM_STEPS[zoomIndex] * 100) + "%";
+      rerender();
+    }}
+
+    function fitToScreen() {{
+      // Calculate column_width needed so all columns fill the container exactly.
+      // We need to know total duration in the chart's natural units first,
+      // so temporarily render at zoom 1× to read gantt_start/gantt_end.
+      const savedIndex = zoomIndex;
+      zoomIndex = 4; // 1×
+      gantt.change_view_mode(gantt.options.view_mode);
+
+      const containerWidth = document.getElementById("gantt-container").clientWidth - 32;
+      const isMonth = gantt.view_is("Month");
+      let totalUnits;
+      if (isMonth) {{
+        const msTotal = gantt.gantt_end - gantt.gantt_start;
+        totalUnits = msTotal / (1000 * 60 * 60 * 24 * 30); // approx months
+      }} else {{
+        const msTotal = gantt.gantt_end - gantt.gantt_start;
+        totalUnits = msTotal / (1000 * 60 * 60 * 24 * 7);  // weeks
+      }}
+
+      // Base column_width at 1× zoom: Week=30, Month=~30 (Frappe default for both)
+      const baseColWidth = gantt.options.column_width; // already at 1× now
+      const naturalWidth = totalUnits * baseColWidth;
+      const ratio = containerWidth / naturalWidth;
+
+      // Find the closest zoom step
+      zoomIndex = ZOOM_STEPS.reduce((bestIdx, step, i) =>
+        Math.abs(step - ratio) < Math.abs(ZOOM_STEPS[bestIdx] - ratio) ? i : bestIdx, 0);
+      document.getElementById("zoom-label").textContent =
+        Math.round(ZOOM_STEPS[zoomIndex] * 100) + "%";
+
+      rerender();
+    }}
+
+    function scrollToFirstTask() {{
+      const container = gantt.$svg.parentElement;
+      const msToFirst = gantt.get_oldest_starting_date() - gantt.gantt_start;
+      const hoursToFirst = msToFirst / 3600000;
+      container.scrollLeft = (hoursToFirst / gantt.options.step) * gantt.options.column_width;
+    }}
+
+    function setView(mode) {{
+      gantt.change_view_mode(mode);
+      setTimeout(afterRender, 0);
+      document.getElementById("btn-week").classList.toggle("active", mode === "Week");
+      document.getElementById("btn-month").classList.toggle("active", mode === "Month");
+    }}
+
+    // Initial load
+    setTimeout(afterRender, 0);
+
+    function exportPng() {{
+      const btn = document.getElementById("export-btn");
+      btn.disabled = true;
+      btn.textContent = "Exporting…";
+
+      const SCALE = 2;           // retina / hi-dpi
+      const PAD   = 24;          // padding around chart
+      const HEADER_H = 56;       // title + subtitle rows
+      const LEGEND_H = 32;       // legend row
+      const TOP_H = HEADER_H + LEGEND_H;
+
+      // --- 1. Capture the live SVG (already includes milestone diamonds) ---
+      const liveSvg = gantt.$svg;
+      const svgW = liveSvg.scrollWidth || liveSvg.getBoundingClientRect().width;
+      const svgH = liveSvg.scrollHeight || liveSvg.getBoundingClientRect().height;
+
+      // Clone and embed the essential Frappe Gantt styles inline so the SVG
+      // renders correctly as a standalone image (CDN stylesheet won't load).
+      const clone = liveSvg.cloneNode(true);
+      clone.setAttribute("width",  svgW);
+      clone.setAttribute("height", svgH);
+      clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+
+      const inlineStyles = `
+        .grid-background {{ fill: #ffffff; }}
+        .grid-header {{ fill: #ffffff; stroke: #e0e0e0; stroke-width: 1.4; }}
+        .grid-row {{ fill: #ffffff; }}
+        .grid-row:nth-child(even) {{ fill: #f5f5f5; }}
+        .row-line {{ stroke: #ebeff2; }}
+        .tick {{ stroke: #e0e0e0; stroke-width: 0.2; }}
+        .tick.thick {{ stroke-width: 0.4; }}
+        .today-highlight {{ fill: #fcf8e3; opacity: 0.5; }}
+        .upper-text {{ fill: #555; font-size: 12px; text-anchor: middle; font-family: sans-serif; }}
+        .lower-text {{ fill: #333; font-size: 12px; text-anchor: middle; font-family: sans-serif; }}
+        .bar {{ fill: #b8c2cc; }}
+        .bar-progress {{ fill: #a3a3ff; }}
+        .bar-label {{ fill: #fff; font-size: 12px; font-family: sans-serif;
+                      dominant-baseline: central; text-anchor: middle; }}
+        .bar-label.big {{ fill: #555; text-anchor: start; }}
+        .project-a .bar {{ fill: #3b82f6; }}
+        .project-a .bar-progress {{ fill: #1d4ed8; }}
+        .project-b .bar {{ fill: #10b981; }}
+        .project-b .bar-progress {{ fill: #047857; }}
+        .project-c .bar {{ fill: #f59e0b; }}
+        .project-c .bar-progress {{ fill: #b45309; }}
+        .is-milestone .bar-group {{ display: none; }}
+        .is-milestone .handle-group {{ display: none; }}
+      `;
+      const styleEl = document.createElementNS("http://www.w3.org/2000/svg", "style");
+      styleEl.textContent = inlineStyles;
+      clone.insertBefore(styleEl, clone.firstChild);
+
+      // Explicitly set a white background on the SVG root so standalone rendering
+      // never shows a transparent/black fill behind the grid.
+      clone.style.background = "#ffffff";
+
+      // Remove all <animate> elements — Frappe uses them to grow bars from width 0.
+      // When the SVG is serialized into a Blob the animations restart, making bars
+      // appear partially filled. Stripping them freezes bars at their final width.
+      clone.querySelectorAll("animate").forEach(el => el.remove());
+
+      const svgData = new XMLSerializer().serializeToString(clone);
+      const svgBlob = new Blob([svgData], {{ type: "image/svg+xml;charset=utf-8" }});
+      const svgUrl  = URL.createObjectURL(svgBlob);
+
+      const img = new Image();
+      img.onload = function() {{
+        const canvasW = svgW + PAD * 2;
+        const canvasH = svgH + TOP_H + PAD * 2;
+
+        const canvas = document.createElement("canvas");
+        canvas.width  = canvasW * SCALE;
+        canvas.height = canvasH * SCALE;
+        const ctx = canvas.getContext("2d");
+        ctx.scale(SCALE, SCALE);
+
+        // Background
+        ctx.fillStyle = "#f5f7fa";
+        ctx.fillRect(0, 0, canvasW, canvasH);
+
+        // White chart card
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        const rx = 8, x0 = PAD - 8, y0 = TOP_H + PAD - 8;
+        const cw = svgW + 16, ch = svgH + 16;
+        ctx.moveTo(x0 + rx, y0);
+        ctx.lineTo(x0 + cw - rx, y0);
+        ctx.quadraticCurveTo(x0 + cw, y0, x0 + cw, y0 + rx);
+        ctx.lineTo(x0 + cw, y0 + ch - rx);
+        ctx.quadraticCurveTo(x0 + cw, y0 + ch, x0 + cw - rx, y0 + ch);
+        ctx.lineTo(x0 + rx, y0 + ch);
+        ctx.quadraticCurveTo(x0, y0 + ch, x0, y0 + ch - rx);
+        ctx.lineTo(x0, y0 + rx);
+        ctx.quadraticCurveTo(x0, y0, x0 + rx, y0);
+        ctx.closePath();
+        ctx.fill();
+
+        // Title
+        ctx.fillStyle = "#1a1a2e";
+        ctx.font = "bold 18px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+        ctx.fillText("Program Timeline", PAD, PAD + 20);
+
+        // Subtitle (week label)
+        ctx.fillStyle = "#6b7280";
+        ctx.font = "13px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+        ctx.fillText(WEEK_LABEL, PAD, PAD + 40);
+
+        // Legend
+        let lx = PAD;
+        const ly = PAD + HEADER_H + 8;
+        const DOT = 12, dotR = 3;
+        PROJECT_LEGEND.forEach(function(item) {{
+          const [name, , color] = item; // [name, cssClass, color]
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(lx + dotR, ly);
+          ctx.lineTo(lx + DOT - dotR, ly);
+          ctx.quadraticCurveTo(lx + DOT, ly, lx + DOT, ly + dotR);
+          ctx.lineTo(lx + DOT, ly + DOT - dotR);
+          ctx.quadraticCurveTo(lx + DOT, ly + DOT, lx + DOT - dotR, ly + DOT);
+          ctx.lineTo(lx + dotR, ly + DOT);
+          ctx.quadraticCurveTo(lx, ly + DOT, lx, ly + DOT - dotR);
+          ctx.lineTo(lx, ly + dotR);
+          ctx.quadraticCurveTo(lx, ly, lx + dotR, ly);
+          ctx.closePath();
+          ctx.fill();
+
+          ctx.fillStyle = "#374151";
+          ctx.font = "13px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+          ctx.fillText(name, lx + DOT + 6, ly + 10);
+          lx += DOT + 6 + ctx.measureText(name).width + 20;
+        }});
+
+        // SVG chart
+        ctx.drawImage(img, PAD, TOP_H + PAD, svgW, svgH);
+
+        URL.revokeObjectURL(svgUrl);
+
+        // Download
+        const link = document.createElement("a");
+        link.download = "timeline.png";
+        link.href = canvas.toDataURL("image/png");
+        link.click();
+
+        btn.disabled = false;
+        btn.textContent = "Export PNG";
+      }};
+      img.onerror = function() {{
+        URL.revokeObjectURL(svgUrl);
+        btn.disabled = false;
+        btn.textContent = "Export PNG";
+        alert("Export failed — try a different browser if this persists.");
+      }};
+      img.src = svgUrl;
+    }}
+  </script>
+</body>
+</html>
+"""
+
+PROJECT_CLASSES = ["project-a", "project-b", "project-c"]
+LEGEND_COLORS = ["#3b82f6", "#10b981", "#f59e0b"]
+
+
+def load_milestones(csv_path: str) -> list[dict]:
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _slugify(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def build_gantt_data(milestones: list[dict]) -> tuple[list[dict], list[tuple[str, str]]]:
+    """Return (frappe_tasks, [(project_name, css_class), ...]) in project order."""
+    # Preserve insertion order of projects
+    seen: dict[str, str] = {}
+    for m in milestones:
+        p = m["project_name"]
+        if p not in seen:
+            idx = len(seen)
+            seen[p] = PROJECT_CLASSES[idx % len(PROJECT_CLASSES)]
+
+    tasks = []
+    for i, m in enumerate(milestones):
+        start = m["start_date"].strip()
+        end = m["end_date"].strip()
+        is_milestone = start == end
+        # Frappe requires end > start; bump end by 1 day so it renders at all
+        if is_milestone:
+            end_dt = date.fromisoformat(end) + timedelta(days=1)
+            end = end_dt.isoformat()
+        css = seen[m["project_name"]]
+        if is_milestone:
+            css += " is-milestone"
+        tasks.append({
+            "id": f"task-{i}",
+            "name": m["milestone_name"],
+            "start": start,
+            "end": end,
+            "progress": 0,
+            "custom_class": css,
+        })
+
+    project_legend = list(seen.items())
+    return tasks, project_legend
+
+
+def render_html(tasks: list[dict], project_legend: list[tuple[str, str]], week_label: str) -> str:
+    legend_items = []
+    legend_data = []  # [name, css_class, color] passed to JS for PNG export
+    for i, (name, css_class) in enumerate(project_legend):
+        color = LEGEND_COLORS[i % len(LEGEND_COLORS)]
+        legend_items.append(
+            f'<div class="legend-item">'
+            f'<div class="legend-dot" style="background:{color}"></div>{name}'
+            f'</div>'
+        )
+        legend_data.append([name, css_class, color])
+    legend_html = "\n".join(legend_items)
+    gantt_json = json.dumps(tasks, indent=2)
+    legend_json = json.dumps(legend_data)
+    week_label_json = json.dumps(week_label)
+    return HTML_TEMPLATE.format(
+        week_label=week_label,
+        legend_html=legend_html,
+        gantt_json=gantt_json,
+        legend_json=legend_json,
+        week_label_json=week_label_json,
+    )
+
+
+def save_output(html: str, output_dir: str, week_label: str) -> str:
+    os.makedirs(output_dir, exist_ok=True)
+    # week_label is "Week of YYYY-MM-DD" — extract the date part for the filename
+    date_part = week_label.replace("Week of ", "").strip()
+    week_date = date.fromisoformat(date_part)
+    iso_week = f"{week_date.isocalendar()[0]}-W{week_date.isocalendar()[1]:02d}"
+    filename = f"timeline_{iso_week}.html"
+    path = os.path.join(output_dir, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    return path
+
+
+def this_monday() -> date:
+    today = date.today()
+    return today - timedelta(days=today.weekday())
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate a program timeline Gantt chart.")
+    parser.add_argument("--csv", default="data/projects.csv", help="Path to milestones CSV")
+    parser.add_argument("--week", default=None, help="Week start date YYYY-MM-DD (default: this Monday)")
+    args = parser.parse_args()
+
+    csv_path = args.csv
+    if not os.path.isabs(csv_path):
+        csv_path = os.path.join(os.path.dirname(__file__), csv_path)
+
+    if not os.path.exists(csv_path):
+        print(f"Error: CSV not found: {csv_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.week:
+        week_start = date.fromisoformat(args.week)
+    else:
+        week_start = this_monday()
+
+    week_label = f"Week of {week_start.isoformat()}"
+
+    milestones = load_milestones(csv_path)
+    if not milestones:
+        print("Error: CSV is empty.", file=sys.stderr)
+        sys.exit(1)
+
+    tasks, project_legend = build_gantt_data(milestones)
+    html = render_html(tasks, project_legend, week_label)
+
+    output_dir = os.path.join(os.path.dirname(__file__), "output")
+    out_path = save_output(html, output_dir, week_label)
+    print(f"Generated: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

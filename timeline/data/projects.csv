@@ -1,0 +1,16 @@
+project_name,milestone_name,start_date,end_date
+Website Redesign,Discovery & Requirements,2026-07-01,2026-07-14
+Website Redesign,Design Mockups,2026-07-15,2026-08-04
+Website Redesign,Development,2026-08-05,2026-09-15
+Website Redesign,Go-Live,2026-09-15,2026-09-15
+Website Redesign,Hypercare,2026-09-15,2026-09-30
+Mobile App Launch,Architecture & Setup,2026-07-01,2026-07-21
+Mobile App Launch,Feature Development,2026-07-22,2026-09-01
+Mobile App Launch,QA & Beta Testing,2026-09-02,2026-09-22
+Mobile App Launch,Go-Live,2026-09-15,2026-09-15
+Mobile App Launch,Hypercare,2026-09-23,2026-09-30
+Data Platform Migration,Assessment & Planning,2026-07-01,2026-07-28
+Data Platform Migration,Migration Execution,2026-07-29,2026-09-08
+Data Platform Migration,Validation,2026-09-09,2026-09-30
+Data Platform Migration,Go-Live,2026-10-01,2026-10-01
+Data Platform Migration,Hypercare,2026-10-02,2026-10-15

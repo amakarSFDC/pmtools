@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:cdn.jsdelivr.net)",
+      "Bash(curl -s \"https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.js\")",
+      "Bash(python3 generate_timeline.py)"
+    ]
+  }
+}
