@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(open *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5002/)",
+      "Bash(pip3 install *)",
+      "Bash(curl *)",
+      "mcp__plugin_browser_browser__browser_navigate",
+      "mcp__plugin_browser_browser__browser_screenshot",
+      "mcp__plugin_browser_browser__browser_click",
+      "mcp__plugin_browser_browser__browser_a11y_tree",
+      "mcp__plugin_browser_browser__browser_type",
+      "mcp__plugin_browser_browser__browser_wait",
+      "Bash(python3 -c ' *)",
+      "Read(//tmp/**)",
+      "mcp__plugin_google-workspace_google-workspace__create_presentation",
+      "mcp__plugin_google-workspace_google-workspace__get_presentation",
+      "mcp__plugin_google-workspace_google-workspace__batch_update_presentation",
+      "mcp__plugin_google-workspace_google-workspace__search_drive_files",
+      "mcp__plugin_google-workspace_google-workspace__copy_drive_file",
+      "mcp__plugin_aisuite_aisuite__python",
+      "mcp__plugin_google-workspace_google-workspace__get_page",
+      "mcp__plugin_google-workspace_google-workspace__get_doc_as_markdown",
+      "Read(//Users/amakar/**)"
+    ]
+  }
+}

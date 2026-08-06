@@ -1,0 +1,24 @@
+# ── Credentials ──────────────────────────────────────────────────────────────
+# Never commit real credentials. credentials.env is a safe template (placeholder
+# values only) and IS tracked. Any filled-in copies must be listed here.
+*.env.local
+*.env.secret
+.env
+.env.*
+!config/credentials.env
+
+# ── Project data ──────────────────────────────────────────────────────────────
+# import.xls contains internal GUS/Salesforce story data — keep off public repo
+data/
+
+# ── Generated reports ─────────────────────────────────────────────────────────
+# Reports contain internal project details (assignees, statuses, dates)
+reports/
+
+# ── OS / editor noise ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+__pycache__/
+*.pyc
