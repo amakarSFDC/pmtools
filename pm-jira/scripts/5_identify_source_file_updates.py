@@ -96,12 +96,13 @@ def write_xls(rows, output_path, sprint_name):
     html += '<table border="1">\n'
     html += '<tr>\n'
     for col in ['Work ID', 'JIRA Key', 'Summary', 'JIRA Status', 'Import Status',
-                'Import Dev Deadline', 'JIRA Due Date', 'Import Sprint', 'Flag Type', 'Action Required']:
+                'Import Dev Deadline', 'JIRA Due Date', 'Import Sprint',
+                'Import Assignee', 'JIRA Assignee', 'Flag Type', 'Action Required']:
         html += f'  <th style="{header_style}">{col}</th>\n'
     html += '</tr>\n'
 
     for row in rows:
-        wid, key, summary, jira_status, imp_status, imp_dl, jira_due, imp_sprint, flag_types, actions = row
+        wid, key, summary, jira_status, imp_status, imp_dl, jira_due, imp_sprint, imp_assignee, jira_assignee, assignee_flagged, flag_types, actions = row
         due_flagged     = 'DUE DATE'            in flag_types
         status_flagged  = 'STATUS'              in flag_types
         removed_flagged = 'REMOVED FROM SCOPE'  in flag_types
@@ -116,6 +117,8 @@ def write_xls(rows, output_path, sprint_name):
         html += f'  <td style="{flag_style if due_flagged else plain_style}">{imp_dl}</td>\n'
         html += f'  <td style="{flag_style if due_flagged else plain_style}">{jira_due}</td>\n'
         html += f'  <td style="{removed_style if sprint_flagged else plain_style}">{imp_sprint}</td>\n'
+        html += f'  <td style="{flag_style if assignee_flagged else plain_style}">{imp_assignee}</td>\n'
+        html += f'  <td style="{plain_style}">{jira_assignee}</td>\n'
         html += f'  <td style="{plain_style}">{", ".join(flag_types)}</td>\n'
         html += f'  <td style="{plain_style}">{"; ".join(actions)}</td>\n'
         html += '</tr>\n'
@@ -160,6 +163,7 @@ def main():
                 'status':   g(row, 'Status'),
                 'deadline': g(row, 'Dev Deadline'),
                 'sprint':   strip_date(g(row, 'Sprint Name')),
+                'assignee': g(row, 'Assigned To'),
             }
 
     # Find sprint ID
@@ -178,7 +182,7 @@ def main():
     resp = api(creds, 'POST', f'{JIRA_BASE_URL}/rest/api/3/search/jql', {
         'jql': f'project={args.project} AND sprint={sprint_id} ORDER BY rank',
         'maxResults': 200,
-        'fields': ['summary', 'status', 'duedate']
+        'fields': ['summary', 'status', 'duedate', 'assignee']
     })
 
     jira_data = {}
@@ -186,25 +190,29 @@ def main():
         f       = issue['fields']
         summary = f.get('summary', '')
         wid     = summary[:8]
+        a       = f.get('assignee')
         if wid.startswith('W-'):
             jira_data[wid] = {
-                'key':     issue['key'],
-                'status':  f['status']['name'],
-                'duedate': f.get('duedate') or '',
-                'summary': summary,
+                'key':      issue['key'],
+                'status':   f['status']['name'],
+                'duedate':  f.get('duedate') or '',
+                'summary':  summary,
+                'assignee': a['displayName'] if a else '',
             }
 
     # Run checks
     report_rows = []
     for wid, jira in sorted(jira_data.items()):
-        imp         = import_data.get(wid, {})
-        imp_status  = imp.get('status', '')
-        imp_dl      = imp.get('deadline', '')
-        imp_sprint  = imp.get('sprint', '')
-        jira_status = jira['status']
-        jira_due    = jira['duedate']
-        key         = jira['key']
-        summary     = jira['summary']
+        imp             = import_data.get(wid, {})
+        imp_status      = imp.get('status', '')
+        imp_dl          = imp.get('deadline', '')
+        imp_sprint      = imp.get('sprint', '')
+        imp_assignee    = imp.get('assignee', '')
+        jira_status     = jira['status']
+        jira_due        = jira['duedate']
+        jira_assignee   = jira['assignee']
+        key             = jira['key']
+        summary         = jira['summary']
 
         flag_types = []
         actions    = []
@@ -242,6 +250,17 @@ def main():
             flag_types.append('SPRINT MISMATCH')
             actions.append(f'Import assigns to "{imp_sprint}" - team may be working ahead of schedule')
 
+        # Check 6: Assignee mismatch between JIRA and import
+        # Normalize both sides: lowercase and replace spaces with dots
+        # e.g. "Leo Kennedy" → "leo.kennedy", "leo.kennedy" → "leo.kennedy" (already normalized)
+        assignee_flagged = False
+        if imp_assignee and jira_assignee:
+            def norm(s): return s.strip().lower().replace(' ', '.')
+            if norm(imp_assignee) != norm(jira_assignee):
+                flag_types.append('ASSIGNEE MISMATCH')
+                actions.append(f'JIRA assignee "{jira_assignee}" differs from import "{imp_assignee}"')
+                assignee_flagged = True
+
         if flag_types:
             imp_dl_fmt  = parse_date(imp_dl, '%m/%d/%Y')
             jira_du_fmt = parse_date(jira_due, '%Y-%m-%d')
@@ -249,7 +268,7 @@ def main():
                 wid, key, summary, jira_status, imp_status,
                 imp_dl_fmt.strftime('%m/%d/%Y') if imp_dl_fmt else '',
                 jira_du_fmt.strftime('%m/%d/%Y') if jira_du_fmt else '',
-                imp_sprint, flag_types, actions
+                imp_sprint, imp_assignee, jira_assignee, assignee_flagged, flag_types, actions
             ))
 
     # Print report
@@ -258,23 +277,27 @@ def main():
     print('=' * 110)
     print()
 
-    for wid, key, summary, jira_status, imp_status, imp_dl, jira_due, imp_sprint, flag_types, actions in report_rows:
-        print(f'Work ID:        {wid}')
-        print(f'JIRA Key:       {key}')
-        print(f'Summary:        {summary}')
-        print(f'JIRA Status:    {jira_status}')
-        print(f'Import Status:  {imp_status}')
+    for wid, key, summary, jira_status, imp_status, imp_dl, jira_due, imp_sprint, imp_assignee, jira_assignee, assignee_flagged, flag_types, actions in report_rows:
+        print(f'Work ID:          {wid}')
+        print(f'JIRA Key:         {key}')
+        print(f'Summary:          {summary}')
+        print(f'JIRA Status:      {jira_status}')
+        print(f'Import Status:    {imp_status}')
         if imp_sprint and imp_sprint != args.sprint:
-            print(f'Import Sprint:  {imp_sprint}')
+            print(f'Import Sprint:    {imp_sprint}')
+        if assignee_flagged:
+            print(f'JIRA Assignee:    {jira_assignee}')
+            print(f'Import Assignee:  {imp_assignee}')
         for ft, ac in zip(flag_types, actions):
             print(f'  !! [{ft}] {ac}')
         print()
 
     print(f'Total stories requiring source system update: {len(report_rows)}')
-    print(f'  Due date issues:        {sum(1 for r in report_rows if "DUE DATE" in r[8])}')
-    print(f'  Status issues:          {sum(1 for r in report_rows if "STATUS" in r[8])}')
-    print(f'  Removed from scope:     {sum(1 for r in report_rows if "REMOVED FROM SCOPE" in r[8])}')
-    print(f'  Sprint mismatches:      {sum(1 for r in report_rows if "SPRINT MISMATCH" in r[8])}')
+    print(f'  Due date issues:        {sum(1 for r in report_rows if "DUE DATE" in r[11])}')
+    print(f'  Status issues:          {sum(1 for r in report_rows if "STATUS" in r[11])}')
+    print(f'  Assignee mismatches:    {sum(1 for r in report_rows if "ASSIGNEE MISMATCH" in r[11])}')
+    print(f'  Removed from scope:     {sum(1 for r in report_rows if "REMOVED FROM SCOPE" in r[11])}')
+    print(f'  Sprint mismatches:      {sum(1 for r in report_rows if "SPRINT MISMATCH" in r[11])}')
 
     write_xls(report_rows, args.output, args.sprint)
 

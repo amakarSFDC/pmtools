@@ -102,15 +102,33 @@ def get_sprint_start_date(raw_name):
     return datetime(base_year, int(m.group(1)), int(m.group(2)))
 
 
+def norm_username(display_name):
+    """Normalize 'First Last' → 'first.last' to match JIRA username format."""
+    return display_name.strip().lower().replace(' ', '.')
+
+
 def lookup_user(creds, display_name):
+    # Search by full display name first
     query = display_name.replace(' ', '%20')
     data = api(creds, 'GET', f'{JIRA_BASE_URL}/rest/api/3/user/search?query={query}')
     if isinstance(data, list):
+        norm = norm_username(display_name)
+        # Prefer exact display name match, then normalized username match
         for u in data:
             if u.get('displayName', '').lower() == display_name.lower():
                 return u['accountId']
+        for u in data:
+            if norm_username(u.get('displayName', '')) == norm or \
+               u.get('name', '').lower() == norm or \
+               u.get('emailAddress', '').lower().split('@')[0] == norm:
+                return u['accountId']
         if data:
             return data[0]['accountId']
+    # Fallback: search by normalized username
+    norm = norm_username(display_name)
+    data2 = api(creds, 'GET', f'{JIRA_BASE_URL}/rest/api/3/user/search?query={norm}')
+    if isinstance(data2, list) and data2:
+        return data2[0]['accountId']
     return None
 
 
@@ -231,7 +249,7 @@ def main():
         # If the target sprint is active, send to backlog with label instead
         active_scope = sprint_id in active_sprint_ids
         if active_scope:
-            fields['labels'] = ['New Scope to Active Sprint']
+            fields['labels'] = ['New_Scope_to_Active_Sprint']
 
         create_resp = api(creds, 'POST', f'{JIRA_BASE_URL}/rest/api/3/issue', {'fields': fields})
 

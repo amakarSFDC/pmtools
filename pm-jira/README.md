@@ -1,6 +1,6 @@
 # JIRA PM Scripts
 
-Five Python scripts for syncing a GUS/Jira export file (`import.xls`) with a JIRA project.
+Nine Python scripts for syncing a GUS/Jira export file (`import.xls`) with a JIRA project.
 No third-party libraries required — only Python 3 standard library + `curl`.
 
 ## Setup
@@ -11,13 +11,14 @@ All scripts require your JIRA credentials passed as arguments:
 - `--email`  : your Atlassian email (e.g. `amakar@salesforce.com`)
 - `--token`  : your Atlassian API token (generate at https://id.atlassian.net/manage-api-tokens)
 
-Credentials are stored in `config/credentials.env`. Open that file, fill in your email and API token, then source it before running any script:
+A local credentials file is provided for convenience. Source it before running any script:
 
 ```bash
-# Edit config/credentials.env with your values, then:
-source config/credentials.env
+source config/credentials.env.local
 python3 scripts/1_create_sprints.py --email "$JIRA_EMAIL" --token "$JIRA_API_TOKEN" ...
 ```
+
+`config/credentials.env.local` is git-ignored and will never be committed. `config/credentials.env` is a safe template with placeholder values only.
 
 ### Import file
 
@@ -26,7 +27,7 @@ The import file must be an HTML-formatted `.xls` export (from GUS) with these co
 `Dev Deadline`, `Story Points - Dev`, `Business Description`,
 `Product Acceptance Criteria`, `Sprint Name`, `Scheduled Build`
 
-Place the file in the `data/` folder. All scripts default to `--file data/import.xls`.
+Place the file in the `data/` folder and rename it to `import.xls`. All scripts default to `--file data/import.xls`.
 
 ### Output
 
@@ -117,12 +118,21 @@ Field mapping:
 | Business Description | Description | |
 | Product Owner | Description (appended) | Added as "Product Owner: name" |
 | Product Acceptance Criteria | Acceptance Criteria | |
-| Assigned To | Assignee | Validated against project; falls back to Leo Kennedy if not found or not assignable |
+| Assigned To | Assignee | See assignee resolution logic below |
 | Dev Deadline | Due Date | |
 | Story Points - Dev | Story Points | |
 | Sprint Name | Sprint | See active sprint behaviour below |
 
-**Active sprint behaviour:** If the target sprint is currently active in JIRA, the story is created in the backlog instead and tagged with the label `New Scope to Active Sprint`. This prevents unplanned work from being silently added to an in-progress sprint. Stories targeting future or closed sprints are assigned to the sprint as normal.
+**Assignee resolution logic:** The `Assigned To` value from the import (e.g. `Leo Kennedy`) is resolved to a JIRA account using the following steps in order:
+
+1. Search JIRA for the full display name (e.g. `Leo Kennedy`)
+2. If no exact match, normalize the name to `firstname.lastname` format (e.g. `leo.kennedy`) and compare against each result's display name, username, and email prefix
+3. If still no match, search JIRA again using the normalized username directly
+4. If all lookups fail or the resolved account is not assignable to the project, fall back to the default assignee (Leo Kennedy) and log a `WARN`
+
+This normalization ensures names like `Brandon Winter` correctly resolve to the JIRA account `brandon.winter`.
+
+**Active sprint behaviour:** If the target sprint is currently active in JIRA, the story is created in the backlog instead and tagged with the label `New Scope to Active Sprint`. This prevents unplanned work from being silently added to an in-progress sprint without the team's awareness. Stories targeting future or closed sprints are assigned to the sprint as normal.
 
 ---
 
@@ -130,6 +140,7 @@ Field mapping:
 
 Compares Work ID and status between the import file and JIRA for one or
 more sprints. Reports matches, mismatches, and stories missing from JIRA.
+Also detects sprint assignment changes for future sprints and applies them automatically.
 Prints results to the terminal.
 
 ```bash
@@ -139,7 +150,7 @@ python3 scripts/4_compare_jira_to_file.py \
   --board 18086 \
   --email "$JIRA_EMAIL" \
   --token "$JIRA_API_TOKEN" \
-  --sprints "2026.07b-Comp Systems 7/15 - 7/28" "2026.07c-Comp Systems 7/29 - 8/11"
+  --sprints "2026.07c-Comp Systems" "2026.08a-Comp Systems"
 ```
 
 | Argument | Required | Default | Description |
@@ -149,15 +160,17 @@ python3 scripts/4_compare_jira_to_file.py \
 | `--board` | Yes | — | JIRA board ID |
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
-| `--sprints` | Yes | — | One or more sprint names (full name with date suffix, space-separated) |
+| `--sprints` | Yes | — | One or more sprint base names (without date suffix, space-separated) |
 
-Note: `--sprints` accepts multiple values. Sprint names must match exactly as they appear in the import file, including the date suffix.
+Note: `--sprints` accepts multiple values. Sprint names should be the base name without the date suffix (e.g. `2026.07c-Comp Systems`, not `2026.07c-Comp Systems 7/29 - 8/11`).
+
+The future sprint analysis section also identifies stories in JIRA that no longer appear in the import file (removed from scope) and stories whose sprint assignments differ between JIRA and the import — and applies sprint changes automatically.
 
 ---
 
 ## Script 5 — Identify Source File Updates
 
-Compares JIRA Due Dates and Statuses against the import file for a sprint
+Compares JIRA status, due date, assignee, and sprint against the import file for a sprint
 and flags anything needing source system attention. Outputs a highlighted `.xls` report
 with flagged cells in yellow and an Actions Required column.
 
@@ -185,18 +198,22 @@ python3 scripts/5_identify_source_file_updates.py \
 
 Note: `--sprint` takes a single sprint name (without date suffix), unlike `--sprints` in script 4.
 
-Three checks are performed:
+Six checks are performed:
 
 | Check | Condition | Flag | Highlighted Column | Action Required |
 |---|---|---|---|---|
-| Due Date | JIRA Due Date is later than import Dev Deadline (skipped if JIRA status is Closed) | DUE DATE | Import Dev Deadline (yellow) | Update due date in source system |
-| Status (closed) | JIRA is Closed and import shows Development or User Story Complete | STATUS | Import Status (yellow) | UPDATE SOURCE SYSTEM |
+| Due Date | JIRA Due Date is later than import Dev Deadline (skipped if JIRA status is Closed) | DUE DATE | Import Dev Deadline + JIRA Due Date (yellow) | Update due date in source system |
+| Status (closed, dev) | JIRA is Closed and import shows Development or User Story Complete | STATUS | Import Status (yellow) | UPDATE SOURCE SYSTEM |
 | Status (closed, other) | JIRA is Closed and import shows any other active status | STATUS | Import Status (yellow) | REVIEW STATUS IN SOURCE SYSTEM |
 | Status (review) | Import shows User Story Complete but JIRA is not Open or Ready for Implementation | STATUS | Import Status (yellow) | REVIEW STATUS IN SOURCE SYSTEM |
+| Sprint Mismatch | Story is in the JIRA sprint but import assigns it to a different sprint (non-Closed only) | SPRINT MISMATCH | Import Sprint (orange) | Import assigns to "sprint" — team may be working ahead of schedule |
+| Assignee Mismatch | JIRA assignee differs from import Assigned To after normalization (non-Closed only) | ASSIGNEE MISMATCH | Import Assignee (yellow) | JIRA assignee "X" differs from import "Y" |
 
-The **Import Dev Deadline** and **Import Status** columns are highlighted in yellow — these are the fields that need to be updated in the source system. JIRA columns are shown for reference only.
+**Assignee comparison logic:** Both the JIRA assignee and the import `Assigned To` value are normalized before comparison — converted to lowercase with spaces replaced by dots (e.g. `Leo Kennedy` → `leo.kennedy`). This prevents false positives where the same person is stored differently across the two systems. Only genuine mismatches (different people) are flagged.
 
-If a story triggers more than one check, all applicable actions appear in the Actions Required column separated by `; `.
+Report columns: Work ID, JIRA Key, Summary, JIRA Status, Import Status, Import Dev Deadline, JIRA Due Date, Import Sprint, Import Assignee, JIRA Assignee, Flag Type, Action Required.
+
+If a story triggers more than one check, all applicable flags and actions appear in their respective columns.
 
 ---
 
@@ -293,7 +310,7 @@ python3 scripts/8_weekly_status_report.py \
   --email "$JIRA_EMAIL" \
   --token "$JIRA_API_TOKEN" \
   --summary data/executive_summary.txt \
-  --output reports/IGSIFP_LeadershipStatusReport_2026-08-06.html
+  --output reports/IGSIFP_LeadershipStatusReport_2026-08-11.html
 ```
 
 | Argument | Required | Default | Description |
@@ -322,3 +339,42 @@ Report sections generated:
 | Team Workload bars | Open story count per assignee |
 | Risk Register | Auto-populated from Blocked stories and past-due open stories |
 | Footer | Sprint name and report date |
+
+---
+
+## Script 9 — Definition of Ready Check
+
+Checks all User Stories in the upcoming (next future) sprint against the Definition of Ready.
+Tasks and other non-Story issue types are automatically skipped.
+
+```bash
+python3 scripts/9_definition_of_ready.py \
+  --project IGSIFP \
+  --board 18086 \
+  --email "$JIRA_EMAIL" \
+  --token "$JIRA_API_TOKEN"
+```
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--project` | Yes | — | JIRA project key |
+| `--board` | Yes | — | JIRA board ID |
+| `--email` | Yes | — | Atlassian email |
+| `--token` | Yes | — | Atlassian API token |
+| `--sprint` | No | next future sprint | Sprint name override (without date suffix) |
+| `--slack-channel` | No | `$SLACK_CHANNEL` env var | Slack channel ID to post results; falls back to env var if not passed |
+
+**Definition of Ready criteria:**
+
+| Check | Field | Pass Condition |
+|---|---|---|
+| Title | `summary` | Non-empty |
+| Description | `description` | Contains non-empty text (ADF traversal) |
+| Acceptance Criteria | `customfield_10033` | Contains non-empty text (ADF traversal) |
+| Story Points | `customfield_10047` | Numeric value > 0 |
+
+Note: Blocker/dependency check is not automatable via the JIRA API and must be reviewed manually.
+
+**Output format:** Terminal table with Y/N per check and READY/NOT READY status. Stories that fail are listed with their missing fields at the end of the report.
+
+**Slack posting:** Results can be posted to Slack channel `C06PHK1DPH7` using the Slack MCP tool.
