@@ -14,6 +14,7 @@ Requirements:
 """
 
 import argparse
+import os
 import re
 import json
 import subprocess
@@ -21,7 +22,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 
 # ── Config ──────────────────────────────────────────────────────────────────
-JIRA_BASE_URL = "https://salesforce.atlassian.net"
+base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
 SKIP_PATTERNS = ['_NO_BUILD_REQUIRED', 'MOCK']
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -87,14 +88,16 @@ def get_build_date(name):
 
 def main():
     parser = argparse.ArgumentParser(description='Create missing future Fix Versions in JIRA from import file.')
-    parser.add_argument('--file',    default='data/import.xls', help='Path to import .xls file')
-    parser.add_argument('--project', required=True,        help='JIRA project key (e.g. IGSIFP)')
-    parser.add_argument('--email',   required=True,        help='JIRA email address')
-    parser.add_argument('--token',   required=True,        help='JIRA API token')
-    parser.add_argument('--today',   default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
+    parser.add_argument('--file',     default='data/import.xls', help='Path to import .xls file')
+    parser.add_argument('--project',  required=True,        help='JIRA project key (e.g. IGSIFP)')
+    parser.add_argument('--email',    required=True,        help='JIRA email address')
+    parser.add_argument('--token',    required=True,        help='JIRA API token')
+    parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--today',    default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
     args = parser.parse_args()
 
     creds = f'{args.email}:{args.token}'
+    base_url = args.base_url
     today = datetime.strptime(args.today, '%Y-%m-%d')
 
     # Parse import file
@@ -114,7 +117,7 @@ def main():
         import_builds.add(val)
 
     # Fetch existing JIRA Fix Versions
-    data = api_get(creds, f'{JIRA_BASE_URL}/rest/api/3/project/{args.project}/versions')
+    data = api_get(creds, f'{base_url}/rest/api/3/project/{args.project}/versions')
     jira_versions = {v['name'] for v in (data if isinstance(data, list) else [])}
 
     # Find missing future versions
@@ -130,7 +133,7 @@ def main():
     print()
 
     for name, date in missing:
-        resp = api_post(creds, f'{JIRA_BASE_URL}/rest/api/3/version', {
+        resp = api_post(creds, f'{base_url}/rest/api/3/version', {
             'name':        name,
             'releaseDate': date.strftime('%Y-%m-%d'),
             'released':    False,

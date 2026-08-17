@@ -6,6 +6,16 @@ Queries the active JIRA sprint and generates a styled HTML leadership
 status report with executive summary, issue register, burn bars,
 risk register, and priority actions.
 
+Optionally reads pre-saved Slack channel messages and Google Drive standup
+notes to populate a "Team Communications Highlights" section.
+
+Workflow for Slack/Drive integration:
+  1. Before running, have Claude read Slack channel C06PHK1DPH7 and save to
+     data/slack_notes_YYYY-MM-DD.txt (Claude MCP → file).
+  2. Optionally have Claude read Google Drive standup notes folder and save to
+     data/standup_notes_YYYY-MM-DD.txt (when Drive network is available).
+  3. Pass the saved files to this script via --slack-notes and --drive-notes.
+
 Usage:
     python3 8_weekly_status_report.py \
         --project IGSIFP \
@@ -13,16 +23,19 @@ Usage:
         --email "$JIRA_EMAIL" \
         --token "$JIRA_API_TOKEN" \
         --summary data/executive_summary.txt \
-        --output reports/IGSIFP_LeadershipStatusReport_2026-08-06.html
+        --slack-notes data/slack_notes_2026-08-13.txt \
+        --output reports/IGSIFP_LeadershipStatusReport_2026-08-13.html
 """
 
 import argparse
 import json
+import os
 import subprocess
 from collections import defaultdict
 from datetime import date, datetime
 
-JIRA_BASE_URL = "https://salesforce.atlassian.net"
+base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
+DRIVE_FOLDER_DEFAULT  = os.environ.get('DRIVE_FOLDER', '')
 
 STATUS_BADGE = {
     'Closed':                  ('badge-green',  'Closed'),
@@ -40,6 +53,25 @@ RISK_BADGE = {
     'on_track':   ('badge-green',  'ON TRACK'),
 }
 
+ACCOMPLISHMENT_KEYWORDS = [
+    'completed', 'closed', 'delivered', 'shipped', 'done', 'finished',
+    'sprint closed', 'sprint complete', 'all stories', 'story points delivered',
+    'successfully', 'wrapped up', 'ready for implementation',
+]
+
+RISK_KEYWORDS = [
+    'risk', 'blocked', 'blocker', 'concern', 'tbd', 'assumption',
+    'pending', 'need to confirm', 'before we', 'not complete', 'not ready',
+    'waiting', 'need due date', 'need story point', 'need to assign',
+    'incomplete', 'unclear', 'unresolved', 'still open',
+]
+
+ISSUE_KEYWORDS = [
+    'issue', 'problem', 'error', "can't", 'unable', 'missing',
+    'broken', 'failed', 'failure', 'outage', 'incident', 'escalation',
+    'access', 'permission', 'not working', 'need to re-request',
+]
+
 
 def api(creds, method, url, payload=None):
     args = ['curl', '-s', '-u', creds, '-X', method,
@@ -53,7 +85,6 @@ def api(creds, method, url, payload=None):
 
 
 def business_days_between(start, end):
-    """Count Mon–Fri days between two dates (inclusive)."""
     count = 0
     cur = start
     while cur <= end:
@@ -112,7 +143,127 @@ def read_executive_summary(path):
         return f'<p style="font-size:14px;color:#c0392b;">[Summary file not found: {path}]</p>'
 
 
-def generate_html(sprint, issues, exec_summary, today):
+def read_notes_file(path):
+    """Read a timestamped messages file. Returns list of (date_str, author, text) tuples."""
+    if not path:
+        return []
+    try:
+        with open(path, encoding='utf-8') as f:
+            lines = [l.rstrip() for l in f if l.strip()]
+        messages = []
+        for line in lines:
+            # Format: [YYYY-MM-DD] Author: message text
+            if line.startswith('[') and ']' in line:
+                bracket_end = line.index(']')
+                date_str = line[1:bracket_end]
+                rest = line[bracket_end + 2:]  # skip '] '
+                if ':' in rest:
+                    colon = rest.index(':')
+                    author = rest[:colon].strip()
+                    text = rest[colon + 1:].strip()
+                    messages.append((date_str, author, text))
+            elif line:
+                messages.append(('', '', line))
+        return messages
+    except FileNotFoundError:
+        print(f'  WARN: Notes file not found: {path}')
+        return []
+
+
+def categorize_messages(messages):
+    """Classify messages into accomplishments, risks, and issues by keyword matching."""
+    accomplishments = []
+    risks = []
+    issues = []
+
+    for date_str, author, text in messages:
+        lower = text.lower()
+        is_accomplishment = any(kw in lower for kw in ACCOMPLISHMENT_KEYWORDS)
+        is_risk = any(kw in lower for kw in RISK_KEYWORDS)
+        is_issue = any(kw in lower for kw in ISSUE_KEYWORDS)
+
+        entry = (date_str, author, text)
+        if is_accomplishment and not is_risk and not is_issue:
+            accomplishments.append(entry)
+        elif is_risk:
+            risks.append(entry)
+        elif is_issue:
+            issues.append(entry)
+
+    return accomplishments, risks, issues
+
+
+def build_highlights_html(slack_messages, drive_messages, drive_folder):
+    """Build HTML for the Team Communications Highlights section."""
+    all_messages = slack_messages + drive_messages
+    if not all_messages:
+        return ''
+
+    accomplishments, risks, issues = categorize_messages(all_messages)
+
+    sources = []
+    if slack_messages:
+        sources.append('Slack channel')
+    if drive_messages:
+        sources.append('Daily standup notes')
+
+    # Google Drive placeholder block (shown when Drive folder is configured but notes unavailable)
+    drive_note = ''
+    if drive_folder and not drive_messages:
+        drive_note = f'''
+    <div class="note-box" style="margin-top:14px;margin-bottom:0;">
+      <strong>Google Drive Standup Notes</strong>
+      Drive folder <code>{drive_folder}</code> configured but not yet read for this report.
+      When network is available, have Claude read the folder and save to <code>data/standup_notes_YYYY-MM-DD.txt</code>,
+      then rerun with <code>--drive-notes data/standup_notes_YYYY-MM-DD.txt</code>.
+    </div>'''
+
+    def fmt_item(date_str, author, text):
+        prefix = f'<span style="font-size:11px;color:#888;">{date_str} · {author}:</span> ' if (date_str or author) else ''
+        return f'<li>{prefix}{text}</li>\n          '
+
+    accom_html = ''
+    if accomplishments:
+        items = ''.join(fmt_item(*m) for m in accomplishments[:8])
+        accom_html = f'''
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:700;color:#1e8449;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px;">Key Accomplishments</div>
+      <ul class="bullet">{items}</ul>
+    </div>'''
+
+    risks_html = ''
+    if risks:
+        items = ''.join(fmt_item(*m) for m in risks[:8])
+        risks_html = f'''
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:700;color:#c0392b;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px;">Risks &amp; Concerns</div>
+      <ul class="bullet">{items}</ul>
+    </div>'''
+
+    issues_html = ''
+    if issues:
+        items = ''.join(fmt_item(*m) for m in issues[:6])
+        issues_html = f'''
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:700;color:#d35400;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.4px;">Issues &amp; Action Items</div>
+      <ul class="bullet">{items}</ul>
+    </div>'''
+
+    if not accom_html and not risks_html and not issues_html:
+        summary_html = '<p style="font-size:12px;color:#888;">No flagged items identified in team communications this week.</p>'
+    else:
+        summary_html = accom_html + risks_html + issues_html
+
+    source_label = ' + '.join(sources)
+    return f'''
+  <div class="section-block">
+    <div class="section-title">Team Communications Highlights — {source_label}</div>
+    <p style="font-size:12px;color:#555;margin-bottom:14px;">Auto-extracted from {len(all_messages)} messages. Items are keyword-matched; review for accuracy before sharing.</p>
+    {summary_html}{drive_note}
+  </div>'''
+
+
+def generate_html(sprint, issues, exec_summary, today, highlights_html='', project='', project_name=''):
     # ── Sprint metadata ────────────────────────────────────────────────────────
     sprint_name  = sprint.get('name', 'Unknown Sprint')
     start_str    = sprint.get('startDate', '')[:10]
@@ -313,15 +464,15 @@ def generate_html(sprint, issues, exec_summary, today):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>IGSIFP {sprint_name} — Leadership Status Report</title>
+<title>{project} {sprint_name} — Leadership Status Report</title>
 <style>{css}</style>
 </head>
 <body>
 
 <div class="header">
-  <h1>IGSIFP — {sprint_name} Leadership Status Report</h1>
+  <h1>{project} — {sprint_name} Leadership Status Report</h1>
   <div class="meta">
-    <span>📋 Project: Internal GIC Spiff Implementation FY27 (IGSIFP)</span>
+    <span>📋 Project: {project_name if project_name else project}</span>
     <span>📅 Report Date: {today_str}</span>
     <span>🗓 Sprint: {sprint_name} &nbsp;|&nbsp; {start_fmt} – {end_fmt}</span>
   </div>
@@ -364,6 +515,8 @@ def generate_html(sprint, issues, exec_summary, today):
       {accom_items if accom_items else '<li style="color:#888;">No stories closed yet this sprint.</li>'}
     </ul>
   </div>
+
+{highlights_html}
 
   <div class="section-block">
     <div class="section-title">Sprint Issue Register</div>
@@ -419,7 +572,7 @@ def generate_html(sprint, issues, exec_summary, today):
 </div>
 
 <div class="footer">
-  <span>IGSIFP Leadership Status Report · Generated {today_str} · Source: Jira Board</span>
+  <span>{project} Leadership Status Report · Generated {today_str} · Source: Jira Board</span>
   <span>{sprint_name} · {start_fmt} – {end_fmt}</span>
 </div>
 
@@ -429,25 +582,34 @@ def generate_html(sprint, issues, exec_summary, today):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Generate weekly IGSIFP leadership status report.')
-    parser.add_argument('--project', required=True,  help='JIRA project key (e.g. IGSIFP)')
-    parser.add_argument('--board',   required=True,  help='JIRA board ID')
-    parser.add_argument('--email',   required=True,  help='JIRA email address')
-    parser.add_argument('--token',   required=True,  help='JIRA API token')
-    parser.add_argument('--summary', default=None,   help='Path to plain-text executive summary file')
-    parser.add_argument('--output',  default=None,   help='Output HTML path (default: reports/IGSIFP_LeadershipStatusReport_YYYY-MM-DD.html)')
-    parser.add_argument('--today',   default=None,   help='Override today\'s date (YYYY-MM-DD)')
+    parser = argparse.ArgumentParser(description='Generate weekly leadership status report.')
+    parser.add_argument('--project',      required=True,  help='JIRA project key (e.g. IGSIFP)')
+    parser.add_argument('--project-name', default=None,   help='Full project name for report header (default: project key)')
+    parser.add_argument('--board',        required=True,  help='JIRA board ID')
+    parser.add_argument('--email',        required=True,  help='JIRA email address')
+    parser.add_argument('--token',        required=True,  help='JIRA API token')
+    parser.add_argument('--base-url',     default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--summary',      default=None,   help='Path to plain-text executive summary file')
+    parser.add_argument('--slack-notes',  default=None,
+                        help='Path to pre-saved Slack messages file (e.g. data/slack_notes_YYYY-MM-DD.txt)')
+    parser.add_argument('--drive-notes',  default=None,
+                        help='Path to pre-saved Google Drive standup notes file (e.g. data/standup_notes_YYYY-MM-DD.txt)')
+    parser.add_argument('--drive-folder', default=DRIVE_FOLDER_DEFAULT,
+                        help='Google Drive folder ID for standup notes (default: $DRIVE_FOLDER)')
+    parser.add_argument('--output',       default=None,   help='Output HTML path (default: reports/{PROJECT}_LeadershipStatusReport_YYYY-MM-DD.html)')
+    parser.add_argument('--today',        default=None,   help='Override today\'s date (YYYY-MM-DD)')
     args = parser.parse_args()
 
     today = date.fromisoformat(args.today) if args.today else date.today()
     creds = f'{args.email}:{args.token}'
+    base_url = args.base_url
 
-    output = args.output or f'reports/IGSIFP_LeadershipStatusReport_{today}.html'
+    output = args.output or f'reports/{args.project}_LeadershipStatusReport_{today}.html'
 
     # Fetch active sprint
     print('Fetching active sprint...')
     sprint_resp = api(creds, 'GET',
-        f'{JIRA_BASE_URL}/rest/agile/1.0/board/{args.board}/sprint?state=active')
+        f'{base_url}/rest/agile/1.0/board/{args.board}/sprint?state=active')
     sprints = sprint_resp.get('values', [])
     if not sprints:
         print('ERROR: No active sprint found on board', args.board)
@@ -461,9 +623,9 @@ def main():
     start_at = 0
     while True:
         resp = api(creds, 'GET',
-            f'{JIRA_BASE_URL}/rest/agile/1.0/sprint/{sprint["id"]}/issue'
+            f'{base_url}/rest/agile/1.0/sprint/{sprint["id"]}/issue'
             f'?startAt={start_at}&maxResults=100'
-            f'&fields=summary,status,duedate,assignee,customfield_10014,priority,labels')
+            f'&fields=summary,status,duedate,assignee,customfield_10014,priority,labels,issuetype')
         batch = resp.get('issues', [])
         if not batch:
             break
@@ -472,9 +634,45 @@ def main():
         if start_at >= resp.get('total', 0):
             break
     print(f'  Issues found: {len(issues)}')
+    issues = [i for i in issues if i['fields']['issuetype']['name'] in ('Story', 'Bug')]
+    print(f'  Stories + Bugs: {len(issues)} (Tasks and Sub-tasks excluded)')
+
+    # Read Slack and Drive notes files
+    slack_messages = []
+    drive_messages = []
+
+    if args.slack_notes:
+        print(f'Reading Slack notes: {args.slack_notes}')
+        slack_messages = read_notes_file(args.slack_notes)
+        print(f'  {len(slack_messages)} Slack messages loaded')
+    else:
+        # Auto-detect: look for data/slack_notes_YYYY-MM-DD.txt matching today
+        auto_slack = f'data/slack_notes_{today}.txt'
+        if os.path.exists(auto_slack):
+            print(f'Auto-detected Slack notes: {auto_slack}')
+            slack_messages = read_notes_file(auto_slack)
+            print(f'  {len(slack_messages)} Slack messages loaded')
+
+    if args.drive_notes:
+        print(f'Reading Drive standup notes: {args.drive_notes}')
+        drive_messages = read_notes_file(args.drive_notes)
+        print(f'  {len(drive_messages)} standup notes loaded')
+    else:
+        # Auto-detect: look for data/standup_notes_YYYY-MM-DD.txt matching today
+        auto_drive = f'data/standup_notes_{today}.txt'
+        if os.path.exists(auto_drive):
+            print(f'Auto-detected Drive notes: {auto_drive}')
+            drive_messages = read_notes_file(auto_drive)
+            print(f'  {len(drive_messages)} standup notes loaded')
+        elif args.drive_folder:
+            print(f'  Drive folder configured ({args.drive_folder}) but no notes file found.')
+            print(f'  To include Drive data: have Claude read the folder and save to data/standup_notes_{today}.txt')
+
+    highlights_html = build_highlights_html(slack_messages, drive_messages, args.drive_folder)
 
     exec_summary = read_executive_summary(args.summary)
-    html = generate_html(sprint, issues, exec_summary, today)
+    html = generate_html(sprint, issues, exec_summary, today, highlights_html,
+                         project=args.project, project_name=args.project_name or '')
 
     with open(output, 'w', encoding='utf-8') as f:
         f.write(html)

@@ -15,6 +15,7 @@ Requirements:
 """
 
 import argparse
+import os
 import re
 import json
 import subprocess
@@ -22,10 +23,10 @@ from datetime import datetime
 from html.parser import HTMLParser
 
 # ── Config ──────────────────────────────────────────────────────────────────
-JIRA_BASE_URL      = "https://salesforce.atlassian.net"
-DEFAULT_ASSIGNEE   = '712020:01709857-506d-46c3-9159-ae56f48b3b22'  # Leo Kennedy
-FIELD_ACCEPTANCE   = 'customfield_10033'
-FIELD_STORY_POINTS = 'customfield_10047'
+base_url_DEFAULT     = os.environ.get('base_url', 'https://salesforce.atlassian.net')
+DEFAULT_ASSIGNEE_FALLBACK = os.environ.get('JIRA_DEFAULT_ASSIGNEE', '')
+FIELD_ACCEPTANCE          = 'customfield_10033'
+FIELD_STORY_POINTS        = 'customfield_10047'
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -110,7 +111,7 @@ def norm_username(display_name):
 def lookup_user(creds, display_name):
     # Search by full display name first
     query = display_name.replace(' ', '%20')
-    data = api(creds, 'GET', f'{JIRA_BASE_URL}/rest/api/3/user/search?query={query}')
+    data = api(creds, 'GET', f'{base_url}/rest/api/3/user/search?query={query}')
     if isinstance(data, list):
         norm = norm_username(display_name)
         # Prefer exact display name match, then normalized username match
@@ -126,7 +127,7 @@ def lookup_user(creds, display_name):
             return data[0]['accountId']
     # Fallback: search by normalized username
     norm = norm_username(display_name)
-    data2 = api(creds, 'GET', f'{JIRA_BASE_URL}/rest/api/3/user/search?query={norm}')
+    data2 = api(creds, 'GET', f'{base_url}/rest/api/3/user/search?query={norm}')
     if isinstance(data2, list) and data2:
         return data2[0]['accountId']
     return None
@@ -134,17 +135,21 @@ def lookup_user(creds, display_name):
 
 def main():
     parser = argparse.ArgumentParser(description='Create missing JIRA stories from import file.')
-    parser.add_argument('--file',        default='data/import.xls',  help='Path to import .xls file')
-    parser.add_argument('--project',     required=True,               help='JIRA project key (e.g. IGSIFP)')
-    parser.add_argument('--board',       required=True,               help='JIRA board ID')
-    parser.add_argument('--email',       required=True,               help='JIRA email address')
-    parser.add_argument('--token',       required=True,               help='JIRA API token')
-    parser.add_argument('--status',      default='User Story Complete', help='Filter: only create stories with this import status')
-    parser.add_argument('--future-only', action='store_true',         help='Only create stories in future-dated sprints')
-    parser.add_argument('--today',       default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
+    parser.add_argument('--file',              default='data/import.xls',  help='Path to import .xls file')
+    parser.add_argument('--project',           required=True,               help='JIRA project key (e.g. IGSIFP)')
+    parser.add_argument('--board',             required=True,               help='JIRA board ID')
+    parser.add_argument('--email',             required=True,               help='JIRA email address')
+    parser.add_argument('--token',             required=True,               help='JIRA API token')
+    parser.add_argument('--base-url',          default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--default-assignee',  default=DEFAULT_ASSIGNEE_FALLBACK, help='JIRA account ID to assign when lookup fails (default: $JIRA_DEFAULT_ASSIGNEE)')
+    parser.add_argument('--status',            default='User Story Complete', help='Filter: only create stories with this import status')
+    parser.add_argument('--future-only',       action='store_true',         help='Only create stories in future-dated sprints')
+    parser.add_argument('--today',             default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
     args = parser.parse_args()
 
     creds = f'{args.email}:{args.token}'
+    base_url = args.base_url
+    DEFAULT_ASSIGNEE = args.default_assignee
     today = datetime.strptime(args.today, '%Y-%m-%d')
 
     # Parse import file
@@ -159,7 +164,7 @@ def main():
         return row[i].strip() if i >= 0 and i < len(row) else ''
 
     # Fetch existing JIRA issues (work IDs from first 8 chars of summary)
-    resp = api(creds, 'POST', f'{JIRA_BASE_URL}/rest/api/3/search/jql', {
+    resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', {
         'jql': f'project={args.project} ORDER BY rank',
         'maxResults': 500,
         'fields': ['summary']
@@ -168,7 +173,7 @@ def main():
 
     # Fetch all sprints for board
     sprint_data = api(creds, 'GET',
-        f'{JIRA_BASE_URL}/rest/agile/1.0/board/{args.board}/sprint?maxResults=200')
+        f'{base_url}/rest/agile/1.0/board/{args.board}/sprint?maxResults=200')
     sprint_map    = {s['name']: s['id']    for s in sprint_data.get('values', [])}
     active_sprint_ids = {s['id'] for s in sprint_data.get('values', []) if s.get('state') == 'active'}
 
@@ -209,13 +214,14 @@ def main():
             # Verify the resolved account can actually be assigned; fall back if not
             if account_id and account_id != DEFAULT_ASSIGNEE:
                 test = api(creds, 'GET',
-                    f'{JIRA_BASE_URL}/rest/api/3/user/assignable/search'
+                    f'{base_url}/rest/api/3/user/assignable/search'
                     f'?project={args.project}&accountId={account_id}')
                 if not (isinstance(test, list) and test):
                     account_id = None
-            assignee_cache[assignee_name] = account_id or DEFAULT_ASSIGNEE
+            assignee_cache[assignee_name] = account_id or DEFAULT_ASSIGNEE or None
             if not account_id:
-                print(f'  WARN  Assignee "{assignee_name}" not found or not assignable, defaulting to Leo Kennedy')
+                default_label = DEFAULT_ASSIGNEE if DEFAULT_ASSIGNEE else 'none (story will be unassigned)'
+                print(f'  WARN  Assignee "{assignee_name}" not found or not assignable, defaulting to {default_label}')
         assignee_id = assignee_cache[assignee_name]
 
         summary       = g(row, 'Subject')
@@ -236,12 +242,13 @@ def main():
             story_points = None
 
         fields = {
-            'project':     {'key': args.project},
-            'issuetype':   {'name': 'Story'},
-            'summary':     summary,
+            'project':   {'key': args.project},
+            'issuetype': {'name': 'Story'},
+            'summary':   summary,
             'description': make_doc(description),
-            'assignee':    {'accountId': assignee_id},
         }
+        if assignee_id:
+            fields['assignee'] = {'accountId': assignee_id}
         if ac:            fields[FIELD_ACCEPTANCE]   = make_doc(ac)
         if due_date:      fields['duedate']           = due_date
         if story_points:  fields[FIELD_STORY_POINTS]  = story_points
@@ -251,7 +258,7 @@ def main():
         if active_scope:
             fields['labels'] = ['New_Scope_to_Active_Sprint']
 
-        create_resp = api(creds, 'POST', f'{JIRA_BASE_URL}/rest/api/3/issue', {'fields': fields})
+        create_resp = api(creds, 'POST', f'{base_url}/rest/api/3/issue', {'fields': fields})
 
         if 'key' not in create_resp:
             print(f'  FAILED  {wid}: {create_resp.get("errors", create_resp.get("errorMessages", create_resp))}')
@@ -265,7 +272,7 @@ def main():
         else:
             # Move to sprint
             sprint_resp = api(creds, 'POST',
-                f'{JIRA_BASE_URL}/rest/agile/1.0/sprint/{sprint_id}/issue',
+                f'{base_url}/rest/agile/1.0/sprint/{sprint_id}/issue',
                 {'issues': [issue_key]})
             if sprint_resp:
                 print(f'  WARN  Sprint move {issue_key}: {sprint_resp}')

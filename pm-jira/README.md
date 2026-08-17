@@ -7,18 +7,34 @@ No third-party libraries required — only Python 3 standard library + `curl`.
 
 ### Credentials
 
-All scripts require your JIRA credentials passed as arguments:
-- `--email`  : your Atlassian email (e.g. `amakar@salesforce.com`)
-- `--token`  : your Atlassian API token (generate at https://id.atlassian.net/manage-api-tokens)
+All scripts require your JIRA credentials passed as arguments or set as environment variables:
 
-A local credentials file is provided for convenience. Source it before running any script:
+| Variable | Argument | Description |
+|---|---|---|
+| `JIRA_EMAIL` | `--email` | Your Atlassian account email |
+| `JIRA_API_TOKEN` | `--token` | Your API token — generate at https://id.atlassian.net/manage-api-tokens |
+| `JIRA_BASE_URL` | `--base-url` | Your Atlassian domain (e.g. `https://yourcompany.atlassian.net`) |
+| `JIRA_DEFAULT_ASSIGNEE` | `--default-assignee` | JIRA account ID to use when assignee lookup fails (Script 3 only) |
+| `SLACK_CHANNEL` | `--slack-channel` | Slack channel ID for posting results (Scripts 8, 9) |
+| `DRIVE_FOLDER` | `--drive-folder` | Google Drive folder ID for standup notes (Script 8 only) |
+
+Copy the template and fill in your values:
 
 ```bash
+cp config/credentials.env config/credentials.env.local
+# Edit config/credentials.env.local with your credentials
 source config/credentials.env.local
 python3 scripts/1_create_sprints.py --email "$JIRA_EMAIL" --token "$JIRA_API_TOKEN" ...
 ```
 
-`config/credentials.env.local` is git-ignored and will never be committed. `config/credentials.env` is a safe template with placeholder values only.
+`config/credentials.env.local` is git-ignored and will never be committed. `config/credentials.env` is the template — only placeholder values should be committed there.
+
+**Finding your JIRA account ID** (needed for `JIRA_DEFAULT_ASSIGNEE`):
+```bash
+curl -u your_email:your_token \
+  "https://yourcompany.atlassian.net/rest/api/3/user/search?query=firstname.lastname" \
+  | python3 -c "import sys,json; [print(u['accountId'], u['displayName']) for u in json.load(sys.stdin)]"
+```
 
 ### Import file
 
@@ -55,6 +71,7 @@ python3 scripts/1_create_sprints.py \
 | `--board` | Yes | — | JIRA board ID |
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
+| `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
 | `--today` | No | system date | Override today's date (YYYY-MM-DD) for future sprint filtering |
 
 ---
@@ -78,6 +95,7 @@ python3 scripts/2_create_fix_versions.py \
 | `--project` | Yes | — | JIRA project key |
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
+| `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
 | `--today` | No | system date | Override today's date (YYYY-MM-DD) for future version filtering |
 
 ---
@@ -106,6 +124,8 @@ python3 scripts/3_create_stories.py \
 | `--board` | Yes | — | JIRA board ID |
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
+| `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
+| `--default-assignee` | No | `$JIRA_DEFAULT_ASSIGNEE` | JIRA account ID fallback when assignee lookup fails |
 | `--status` | No | `User Story Complete` | Only create stories matching this import status |
 | `--future-only` | No | off | Only create stories in future-dated sprints |
 | `--today` | No | system date | Override today's date (YYYY-MM-DD) for future sprint filtering |
@@ -132,7 +152,7 @@ Field mapping:
 
 This normalization ensures names like `Brandon Winter` correctly resolve to the JIRA account `brandon.winter`.
 
-**Active sprint behaviour:** If the target sprint is currently active in JIRA, the story is created in the backlog instead and tagged with the label `New Scope to Active Sprint`. This prevents unplanned work from being silently added to an in-progress sprint without the team's awareness. Stories targeting future or closed sprints are assigned to the sprint as normal.
+**Active sprint behaviour:** If the target sprint is currently active in JIRA, the story is created in the backlog instead and tagged with the label `New_Scope_to_Active_Sprint`. This prevents unplanned work from being silently added to an in-progress sprint without the team's awareness. Stories targeting future or closed sprints are assigned to the sprint as normal.
 
 ---
 
@@ -160,6 +180,7 @@ python3 scripts/4_compare_jira_to_file.py \
 | `--board` | Yes | — | JIRA board ID |
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
+| `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
 | `--sprints` | Yes | — | One or more sprint base names (without date suffix, space-separated) |
 
 Note: `--sprints` accepts multiple values. Sprint names should be the base name without the date suffix (e.g. `2026.07c-Comp Systems`, not `2026.07c-Comp Systems 7/29 - 8/11`).
@@ -170,11 +191,22 @@ The future sprint analysis section also identifies stories in JIRA that no longe
 
 ## Script 5 — Identify Source File Updates
 
-Compares JIRA status, due date, assignee, and sprint against the import file for a sprint
+Compares JIRA status, due date, assignee, story points, and sprint against the import file
 and flags anything needing source system attention. Outputs a highlighted `.xls` report
 with flagged cells in yellow and an Actions Required column.
 
+Sprint defaults to the **active sprint** when `--sprint` is omitted.
+
 ```bash
+# Active sprint (default):
+python3 scripts/5_identify_source_file_updates.py \
+  --file data/import.xls \
+  --project IGSIFP \
+  --board 18086 \
+  --email "$JIRA_EMAIL" \
+  --token "$JIRA_API_TOKEN"
+
+# Specific sprint:
 python3 scripts/5_identify_source_file_updates.py \
   --file data/import.xls \
   --project IGSIFP \
@@ -192,28 +224,32 @@ python3 scripts/5_identify_source_file_updates.py \
 | `--board` | Yes | — | JIRA board ID |
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
-| `--sprint` | Yes | — | Sprint base name (without date suffix, e.g. `2026.07c-Comp Systems`) |
+| `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
+| `--sprint` | No | active sprint | Sprint base name (without date suffix, e.g. `2026.07c-Comp Systems`) |
 | `--output` | No | `reports/source_update_report.xls` | Path for the output report |
 | `--today` | No | system date | Override today's date (YYYY-MM-DD) |
 
-Note: `--sprint` takes a single sprint name (without date suffix), unlike `--sprints` in script 4.
-
-Six checks are performed:
+Seven checks are performed:
 
 | Check | Condition | Flag | Highlighted Column | Action Required |
 |---|---|---|---|---|
 | Due Date | JIRA Due Date is later than import Dev Deadline (skipped if JIRA status is Closed) | DUE DATE | Import Dev Deadline + JIRA Due Date (yellow) | Update due date in source system |
-| Status (closed, dev) | JIRA is Closed and import shows Development or User Story Complete | STATUS | Import Status (yellow) | UPDATE SOURCE SYSTEM |
-| Status (closed, other) | JIRA is Closed and import shows any other active status | STATUS | Import Status (yellow) | REVIEW STATUS IN SOURCE SYSTEM |
-| Status (review) | Import shows User Story Complete but JIRA is not Open or Ready for Implementation | STATUS | Import Status (yellow) | REVIEW STATUS IN SOURCE SYSTEM |
+| Status (closed) | JIRA is Closed and import shows Development | STATUS | Import Status (yellow) | UPDATE SOURCE SYSTEM |
+| Status (USC) | Import shows User Story Complete but JIRA has progressed beyond Open or Ready for Implementation | STATUS | Import Status (yellow) | JIRA status is "X" — update import status to reflect current work state |
+| Removed from Scope | Story exists in JIRA sprint but has no matching Work ID in the import file (non-Closed only) | REMOVED FROM SCOPE | JIRA Status + Import Status (orange) | Confirm if removed from scope |
 | Sprint Mismatch | Story is in the JIRA sprint but import assigns it to a different sprint (non-Closed only) | SPRINT MISMATCH | Import Sprint (orange) | Import assigns to "sprint" — team may be working ahead of schedule |
 | Assignee Mismatch | JIRA assignee differs from import Assigned To after normalization (non-Closed only) | ASSIGNEE MISMATCH | Import Assignee (yellow) | JIRA assignee "X" differs from import "Y" |
+| Story Points Mismatch | JIRA story points differ from import Story Points - Dev (when both are set) | STORY POINTS MISMATCH | Import Story Points + JIRA Story Points (yellow) | JIRA story points (X) differ from import (Y) |
 
-**Assignee comparison logic:** Both the JIRA assignee and the import `Assigned To` value are normalized before comparison — converted to lowercase with spaces replaced by dots (e.g. `Leo Kennedy` → `leo.kennedy`). This prevents false positives where the same person is stored differently across the two systems. Only genuine mismatches (different people) are flagged.
+**Note:** `User Story Complete` means the story has been written and handed to the dev team — it is not an implementation-complete status. If JIRA has progressed beyond Open or Ready for Implementation, the source system should be updated to reflect the current work state.
 
-Report columns: Work ID, JIRA Key, Summary, JIRA Status, Import Status, Import Dev Deadline, JIRA Due Date, Import Sprint, Import Assignee, JIRA Assignee, Flag Type, Action Required.
+**Assignee comparison logic:** Both sides normalized to `firstname.lastname` before comparison (e.g. `Leo Kennedy` → `leo.kennedy`). Only genuine mismatches flagged.
+
+Report columns: Work ID, JIRA Key, Summary, JIRA Status, Import Status, Import Dev Deadline, JIRA Due Date, Import Sprint, Import Assignee, JIRA Assignee, Import Story Points, JIRA Story Points, Flag Type, Action Required.
 
 If a story triggers more than one check, all applicable flags and actions appear in their respective columns.
+
+The script header in `scripts/5_identify_source_file_updates.py` also lists the six checks for quick reference.
 
 ---
 
@@ -240,6 +276,7 @@ Add `--dry-run` to report what would be updated without making any changes.
 | `--project` | Yes | — | JIRA project key |
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
+| `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
 | `--dry-run` | No | off | Report only — do not update JIRA |
 
 The script categorises every story missing a fix version into one of three groups:
@@ -270,6 +307,7 @@ python3 scripts/7_stories_by_epic.py \
 | `--project` | Yes | — | JIRA project key |
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
+| `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
 | `--output` | No | `reports/JIRA_Stories_by_Epic.xls` | Output report path |
 
 Report format:
@@ -291,7 +329,17 @@ Each epic group has a blue-tinted header row showing the epic name and story cou
 Queries the active JIRA sprint and generates a styled HTML leadership status
 report. Includes an executive summary (from a plain-text input file), issue
 register, burn bars, workload bars, risk register (auto-populated from blocked
-and past-due stories), and a list of accomplishments.
+and past-due stories), a list of accomplishments, and optionally a "Team
+Communications Highlights" section populated from Slack messages and/or Google
+Drive standup notes.
+
+**Workflow for Slack/Drive integration:**
+
+1. Have Claude read Slack channel C06PHK1DPH7 and save messages to `data/slack_notes_YYYY-MM-DD.txt`
+2. (Optional) Have Claude read Google Drive standup notes folder `10zqzHGYSjehzJAgUUPX0VOF2cykB10jC` and save to `data/standup_notes_YYYY-MM-DD.txt`
+3. Pass the saved files to the script via `--slack-notes` and/or `--drive-notes`
+
+The script also **auto-detects** notes files named `data/slack_notes_YYYY-MM-DD.txt` and `data/standup_notes_YYYY-MM-DD.txt` matching today's date, so the flags can be omitted when files are in place.
 
 ```bash
 # Step 1: Write your executive summary (one paragraph per blank line):
@@ -299,31 +347,39 @@ cat > data/executive_summary.txt << 'EOF'
 The GIC workstream is executing Sprint 2026.07c (7/29–8/11) with three business days remaining...
 
 The team adopted two new delivery practices this sprint...
-
-Two items are actively being managed as user story risks...
 EOF
 
-# Step 2: Generate the report:
+# Step 2: Generate the report (with optional Slack notes):
 python3 scripts/8_weekly_status_report.py \
   --project IGSIFP \
   --board 18086 \
   --email "$JIRA_EMAIL" \
   --token "$JIRA_API_TOKEN" \
   --summary data/executive_summary.txt \
-  --output reports/IGSIFP_LeadershipStatusReport_2026-08-11.html
+  --slack-notes data/slack_notes_2026-08-13.txt \
+  --output reports/IGSIFP_LeadershipStatusReport_2026-08-13.html
 ```
 
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | `--project` | Yes | — | JIRA project key |
+| `--project-name` | No | project key | Full project name for report header (e.g. `"Internal GIC Spiff Implementation FY27"`) |
 | `--board` | Yes | — | JIRA board ID |
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
+| `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
 | `--summary` | No | — | Path to plain-text executive summary file |
-| `--output` | No | `reports/IGSIFP_LeadershipStatusReport_YYYY-MM-DD.html` | Output HTML path |
+| `--slack-notes` | No | auto-detect `data/slack_notes_YYYY-MM-DD.txt` | Path to pre-saved Slack messages file |
+| `--drive-notes` | No | auto-detect `data/standup_notes_YYYY-MM-DD.txt` | Path to pre-saved Google Drive standup notes file |
+| `--drive-folder` | No | `$DRIVE_FOLDER` | Google Drive folder ID (shown in placeholder when Drive unavailable) |
+| `--output` | No | `reports/{PROJECT}_LeadershipStatusReport_YYYY-MM-DD.html` | Output HTML path |
 | `--today` | No | system date | Override today's date (YYYY-MM-DD) |
 
-**Executive summary file format:** Plain text, paragraphs separated by blank lines. Each paragraph becomes its own `<p>` block in the report. Write three paragraphs: (1) sprint status, (2) delivery practices / team, (3) risks.
+**Executive summary file format:** Plain text, paragraphs separated by blank lines. Each paragraph becomes its own `<p>` block in the report.
+
+**Notes file format:** One message per line in the format `[YYYY-MM-DD] Author: message text`. Claude saves Slack and Drive content in this format automatically.
+
+**Highlights extraction:** Messages are keyword-matched into three groups — Key Accomplishments, Risks & Concerns, and Issues & Action Items. The section includes a disclaimer to review for accuracy before sharing. When a Drive folder is configured but no notes file is present, a placeholder note is shown with instructions to add Drive data for future runs.
 
 Report sections generated:
 
@@ -334,18 +390,22 @@ Report sections generated:
 | Summary cards | Story counts from sprint issues |
 | Executive Summary | `--summary` file (PM-authored) |
 | Accomplishments | All Closed stories in the sprint |
+| Team Communications Highlights | Keyword-extracted from Slack + Drive notes (when provided) |
 | Issue Register | All sprint stories with status badges and row highlights |
 | Sprint Burn bars | Time elapsed vs. stories closed vs. expected pace |
 | Team Workload bars | Open story count per assignee |
 | Risk Register | Auto-populated from Blocked stories and past-due open stories |
 | Footer | Sprint name and report date |
 
+Note: Only User Stories and Bugs are analyzed; Tasks and Sub-tasks are excluded.
+
 ---
 
 ## Script 9 — Definition of Ready Check
 
 Checks all User Stories in the upcoming (next future) sprint against the Definition of Ready.
-Tasks and other non-Story issue types are automatically skipped.
+Tasks and other non-Story issue types are automatically skipped. Reports total story points
+for the sprint and optionally posts results to Slack.
 
 ```bash
 python3 scripts/9_definition_of_ready.py \
@@ -361,20 +421,22 @@ python3 scripts/9_definition_of_ready.py \
 | `--board` | Yes | — | JIRA board ID |
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
+| `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
 | `--sprint` | No | next future sprint | Sprint name override (without date suffix) |
 | `--slack-channel` | No | `$SLACK_CHANNEL` env var | Slack channel ID to post results; falls back to env var if not passed |
 
-**Definition of Ready criteria:**
+**Definition of Ready criteria (all 5 must pass):**
 
-| Check | Field | Pass Condition |
-|---|---|---|
-| Title | `summary` | Non-empty |
-| Description | `description` | Contains non-empty text (ADF traversal) |
-| Acceptance Criteria | `customfield_10033` | Contains non-empty text (ADF traversal) |
-| Story Points | `customfield_10047` | Numeric value > 0 |
+| Check | Column | Field | Pass Condition |
+|---|---|---|---|
+| Title | Title | `summary` | Non-empty |
+| Description | Desc | `description` | Contains non-empty text (ADF traversal) |
+| Acceptance Criteria | AC | `customfield_10033` | Contains non-empty text (ADF traversal) |
+| Story Points | Pts | `customfield_10047` | Numeric value > 0 |
+| Ready for Implementation | RFI | `status.name` | Must equal `Ready for Implementation` |
 
 Note: Blocker/dependency check is not automatable via the JIRA API and must be reviewed manually.
 
-**Output format:** Terminal table with Y/N per check and READY/NOT READY status. Stories that fail are listed with their missing fields at the end of the report.
+**Output format:** Terminal table with Y/N per check column and READY/NOT READY status. Summary line includes total story points across all User Stories in the sprint. Stories that fail are listed with their missing fields at the end of the report.
 
-**Slack posting:** Results can be posted to Slack channel `C06PHK1DPH7` using the Slack MCP tool.
+**Slack channel:** Set `$SLACK_CHANNEL` in `config/credentials.env.local` or pass `--slack-channel`. The script prints the configured channel at the end of each run. Post results using the Slack MCP tool.

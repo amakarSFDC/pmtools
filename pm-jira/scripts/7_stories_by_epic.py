@@ -14,13 +14,14 @@ Requirements:
 """
 
 import argparse
+import os
 import json
 import subprocess
 from collections import defaultdict
 from datetime import datetime
 
 # ── Config ──────────────────────────────────────────────────────────────────
-JIRA_BASE_URL = "https://salesforce.atlassian.net"
+base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -68,16 +69,18 @@ def write_xls(by_epic, output_path):
 
 def main():
     parser = argparse.ArgumentParser(description='Generate a JIRA Stories by Epic XLS report.')
-    parser.add_argument('--project', required=True,                          help='JIRA project key (e.g. IGSIFP)')
-    parser.add_argument('--email',   required=True,                          help='JIRA email address')
-    parser.add_argument('--token',   required=True,                          help='JIRA API token')
-    parser.add_argument('--output',  default='reports/JIRA_Stories_by_Epic.xls', help='Output .xls report path')
+    parser.add_argument('--project',  required=True,                          help='JIRA project key (e.g. IGSIFP)')
+    parser.add_argument('--email',    required=True,                          help='JIRA email address')
+    parser.add_argument('--token',    required=True,                          help='JIRA API token')
+    parser.add_argument('--base-url', default=base_url_DEFAULT,          help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--output',   default='reports/JIRA_Stories_by_Epic.xls', help='Output .xls report path')
     args = parser.parse_args()
 
     creds = f'{args.email}:{args.token}'
+    base_url = args.base_url
 
     # Fetch all epics
-    epic_resp = api(creds, 'POST', f'{JIRA_BASE_URL}/rest/api/3/search/jql', {
+    epic_resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', {
         'jql':        f'project={args.project} AND issuetype = Epic ORDER BY summary',
         'maxResults': 100,
         'fields':     ['summary', 'status']
@@ -96,7 +99,7 @@ def main():
         }
         if next_token:
             payload['nextPageToken'] = next_token
-        resp  = api(creds, 'POST', f'{JIRA_BASE_URL}/rest/api/3/search/jql', payload)
+        resp  = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', payload)
         batch = resp.get('issues', [])
         if not batch:
             break

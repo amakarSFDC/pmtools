@@ -14,6 +14,7 @@ Requirements:
 """
 
 import argparse
+import os
 import re
 import json
 import subprocess
@@ -21,7 +22,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 
 # ── Config ──────────────────────────────────────────────────────────────────
-JIRA_BASE_URL = "https://salesforce.atlassian.net"
+base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -109,10 +110,12 @@ def main():
     parser.add_argument('--board',    required=True,        help='JIRA board ID')
     parser.add_argument('--email',    required=True,        help='JIRA email address')
     parser.add_argument('--token',    required=True,        help='JIRA API token')
+    parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
     parser.add_argument('--today',    default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
     args = parser.parse_args()
 
     creds = f'{args.email}:{args.token}'
+    base_url = args.base_url
     today = datetime.strptime(args.today, '%Y-%m-%d')
 
     # Parse import file
@@ -132,7 +135,7 @@ def main():
             import_sprints[clean] = raw
 
     # Fetch existing JIRA sprints
-    data = api_get(creds, f'{JIRA_BASE_URL}/rest/agile/1.0/board/{args.board}/sprint?maxResults=200')
+    data = api_get(creds, f'{base_url}/rest/agile/1.0/board/{args.board}/sprint?maxResults=200')
     jira_sprints = {s['name'] for s in data.get('values', [])}
 
     # Find missing future sprints
@@ -150,7 +153,7 @@ def main():
 
     for clean, raw, start_date in missing:
         start, end = parse_sprint_dates(raw)
-        resp = api_post(creds, f'{JIRA_BASE_URL}/rest/agile/1.0/sprint', {
+        resp = api_post(creds, f'{base_url}/rest/agile/1.0/sprint', {
             'name': clean,
             'startDate': start,
             'endDate': end,

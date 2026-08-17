@@ -5,11 +5,15 @@ Definition of Ready Check
 Checks all User Stories in the upcoming (next future) sprint against the
 Definition of Ready. Tasks and other non-Story issue types are skipped.
 
-Definition of Ready:
-  - Story has a title (summary)
-  - Story has a description
-  - Story has acceptance criteria
-  - Story has story points assigned
+Definition of Ready (all must pass):
+  1. Story has a title (non-empty summary)
+  2. Story has a description
+  3. Story has acceptance criteria (customfield_10033)
+  4. Story has story points assigned (customfield_10047 > 0)
+  5. Story status is "Ready for Implementation"
+
+Output includes Y/N per check, READY/NOT READY status, total story points,
+and an optional Slack post to $SLACK_CHANNEL (or --slack-channel).
 
 Usage:
     python3 9_definition_of_ready.py \
@@ -17,6 +21,9 @@ Usage:
         --board 18086 \
         --email "$JIRA_EMAIL" \
         --token "$JIRA_API_TOKEN"
+
+    # Target a specific sprint:
+    python3 9_definition_of_ready.py ... --sprint "2026.08b-Comp Systems"
 """
 
 import argparse
@@ -24,7 +31,7 @@ import json
 import os
 import subprocess
 
-JIRA_BASE_URL = "https://salesforce.atlassian.net"
+base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
 FIELD_AC           = 'customfield_10033'
 FIELD_STORY_POINTS = 'customfield_10047'
 
@@ -72,19 +79,21 @@ def check_dor(issue):
 
 def main():
     parser = argparse.ArgumentParser(description='Check upcoming sprint User Stories against Definition of Ready.')
-    parser.add_argument('--project', required=True,  help='JIRA project key (e.g. IGSIFP)')
-    parser.add_argument('--board',   required=True,  help='JIRA board ID')
-    parser.add_argument('--email',   required=True,  help='JIRA email address')
-    parser.add_argument('--token',   required=True,  help='JIRA API token')
-    parser.add_argument('--sprint',        default=None,                        help='Sprint name override (default: next future sprint)')
+    parser.add_argument('--project',       required=True,  help='JIRA project key (e.g. IGSIFP)')
+    parser.add_argument('--board',         required=True,  help='JIRA board ID')
+    parser.add_argument('--email',         required=True,  help='JIRA email address')
+    parser.add_argument('--token',         required=True,  help='JIRA API token')
+    parser.add_argument('--base-url',      default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--sprint',        default=None,   help='Sprint name override (default: next future sprint)')
     parser.add_argument('--slack-channel', default=os.environ.get('SLACK_CHANNEL'), help='Slack channel ID to post results (overrides $SLACK_CHANNEL)')
     args = parser.parse_args()
 
     creds = f'{args.email}:{args.token}'
+    base_url = args.base_url
 
     # Find target sprint
     sprint_resp = api(creds, 'GET',
-        f'{JIRA_BASE_URL}/rest/agile/1.0/board/{args.board}/sprint?maxResults=50')
+        f'{base_url}/rest/agile/1.0/board/{args.board}/sprint?maxResults=50')
     sprints = sprint_resp.get('values', [])
 
     if args.sprint:
@@ -103,7 +112,7 @@ def main():
 
     # Fetch sprint issues
     resp = api(creds, 'GET',
-        f'{JIRA_BASE_URL}/rest/agile/1.0/sprint/{sprint["id"]}/issue'
+        f'{base_url}/rest/agile/1.0/sprint/{sprint["id"]}/issue'
         f'?maxResults=100&fields=summary,issuetype,description,{FIELD_AC},{FIELD_STORY_POINTS},status')
     issues = resp.get('issues', [])
 

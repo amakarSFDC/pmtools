@@ -22,6 +22,7 @@ Requirements:
 """
 
 import argparse
+import os
 import re
 import json
 import subprocess
@@ -29,7 +30,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 
 # ── Config ──────────────────────────────────────────────────────────────────
-JIRA_BASE_URL = "https://salesforce.atlassian.net"
+base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -90,10 +91,12 @@ def main():
     parser.add_argument('--all',      action='store_true',       help='Compare entire project (all JIRA stories, not just specified sprints)')
     parser.add_argument('--email',    required=True,             help='JIRA email address')
     parser.add_argument('--token',    required=True,             help='JIRA API token')
+    parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
     parser.add_argument('--today',    default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
     args = parser.parse_args()
 
     creds = f'{args.email}:{args.token}'
+    base_url = args.base_url
     today = datetime.strptime(args.today, '%Y-%m-%d')
     target_sprints = set(args.sprints)
 
@@ -129,7 +132,7 @@ def main():
 
     # Fetch all sprint data from JIRA
     sprint_data = api(creds, 'GET',
-        f'{JIRA_BASE_URL}/rest/agile/1.0/board/{args.board}/sprint?maxResults=200')
+        f'{base_url}/rest/agile/1.0/board/{args.board}/sprint?maxResults=200')
     all_sprints     = sprint_data.get('values', [])
     sprint_id_map   = {s['name']: s['id'] for s in all_sprints}
     sprint_name_map = {s['id']: s['name'] for s in all_sprints}
@@ -149,7 +152,7 @@ def main():
             }
             if next_token:
                 payload['nextPageToken'] = next_token
-            resp   = api(creds, 'POST', f'{JIRA_BASE_URL}/rest/api/3/search/jql', payload)
+            resp   = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', payload)
             issues = resp.get('issues', [])
             if not issues:
                 break
@@ -217,7 +220,7 @@ def main():
         if not sprint_ids:
             print('ERROR: No matching sprint IDs found in JIRA. Check sprint names.')
         else:
-            resp = api(creds, 'POST', f'{JIRA_BASE_URL}/rest/api/3/search/jql', {
+            resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', {
                 'jql': f'project={args.project} AND sprint in ({",".join(sprint_ids)}) ORDER BY rank',
                 'maxResults': 200,
                 'fields': ['summary', 'status']
@@ -290,7 +293,7 @@ def main():
 
     future_sprint_ids = [str(s['id']) for s in future_sprints]
 
-    resp2 = api(creds, 'POST', f'{JIRA_BASE_URL}/rest/api/3/search/jql', {
+    resp2 = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', {
         'jql': f'project={args.project} AND sprint in ({",".join(future_sprint_ids)}) ORDER BY rank',
         'maxResults': 500,
         'fields': ['summary', 'status', 'customfield_10020']
@@ -340,7 +343,7 @@ def main():
         for wid, key, summary, old_sprint, new_sprint, new_sprint_id in sprint_changes:
             if new_sprint_id:
                 move_resp = api(creds, 'POST',
-                    f'{JIRA_BASE_URL}/rest/agile/1.0/sprint/{new_sprint_id}/issue',
+                    f'{base_url}/rest/agile/1.0/sprint/{new_sprint_id}/issue',
                     {'issues': [key]})
                 updated = 'FAILED: ' + str(move_resp) if move_resp else 'UPDATED'
             else:

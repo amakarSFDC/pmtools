@@ -16,12 +16,13 @@ Requirements:
 """
 
 import argparse
+import os
 import json
 import subprocess
 from html.parser import HTMLParser
 
 # ── Config ──────────────────────────────────────────────────────────────────
-JIRA_BASE_URL = "https://salesforce.atlassian.net"
+base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -71,14 +72,16 @@ def api(creds, method, url, payload=None):
 
 def main():
     parser = argparse.ArgumentParser(description='Assign fix versions to JIRA stories missing them.')
-    parser.add_argument('--file',    default='data/import.xls', help='Path to import .xls file')
-    parser.add_argument('--project', required=True,             help='JIRA project key (e.g. IGSIFP)')
-    parser.add_argument('--email',   required=True,             help='JIRA email address')
-    parser.add_argument('--token',   required=True,             help='JIRA API token')
-    parser.add_argument('--dry-run', action='store_true',       help='Report only — do not update JIRA')
+    parser.add_argument('--file',     default='data/import.xls', help='Path to import .xls file')
+    parser.add_argument('--project',  required=True,             help='JIRA project key (e.g. IGSIFP)')
+    parser.add_argument('--email',    required=True,             help='JIRA email address')
+    parser.add_argument('--token',    required=True,             help='JIRA API token')
+    parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--dry-run',  action='store_true',       help='Report only — do not update JIRA')
     args = parser.parse_args()
 
     creds = f'{args.email}:{args.token}'
+    base_url = args.base_url
 
     # Parse import file
     with open(args.file, 'r', encoding='iso-8859-1') as f:
@@ -98,7 +101,7 @@ def main():
             import_data[wid] = g(row, 'Scheduled Build')
 
     # Fetch project fix versions (name → id map)
-    versions = api(creds, 'GET', f'{JIRA_BASE_URL}/rest/api/3/project/{args.project}/versions')
+    versions = api(creds, 'GET', f'{base_url}/rest/api/3/project/{args.project}/versions')
     version_map = {v['name']: v['id'] for v in versions}
 
     # Fetch all JIRA stories missing a fix version
@@ -112,7 +115,7 @@ def main():
         }
         if next_token:
             payload['nextPageToken'] = next_token
-        resp   = api(creds, 'POST', f'{JIRA_BASE_URL}/rest/api/3/search/jql', payload)
+        resp   = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', payload)
         issues = resp.get('issues', [])
         if not issues:
             break
@@ -158,7 +161,7 @@ def main():
             print(f'  DRY   {jira["key"]} | {wid} -> {sb}')
             updated.append(wid)
         else:
-            r = api(creds, 'PUT', f'{JIRA_BASE_URL}/rest/api/3/issue/{jira["key"]}',
+            r = api(creds, 'PUT', f'{base_url}/rest/api/3/issue/{jira["key"]}',
                     {'fields': {'fixVersions': [{'id': vid}]}})
             if r:
                 print(f'  FAIL  {jira["key"]} | {wid}: {r}')
