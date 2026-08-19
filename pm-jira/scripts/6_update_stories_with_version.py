@@ -22,7 +22,7 @@ import subprocess
 from html.parser import HTMLParser
 
 # ── Config ──────────────────────────────────────────────────────────────────
-base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
+base_url_DEFAULT = os.environ.get('JIRA_BASE_URL', 'https://salesforce.atlassian.net')
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -76,7 +76,7 @@ def main():
     parser.add_argument('--project',  required=True,             help='JIRA project key (e.g. IGSIFP)')
     parser.add_argument('--email',    required=True,             help='JIRA email address')
     parser.add_argument('--token',    required=True,             help='JIRA API token')
-    parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $JIRA_BASE_URL)')
     parser.add_argument('--dry-run',  action='store_true',       help='Report only — do not update JIRA')
     args = parser.parse_args()
 

@@ -23,7 +23,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 
 # ── Config ──────────────────────────────────────────────────────────────────
-base_url_DEFAULT     = os.environ.get('base_url', 'https://salesforce.atlassian.net')
+base_url_DEFAULT     = os.environ.get('JIRA_BASE_URL', 'https://salesforce.atlassian.net')
 DEFAULT_ASSIGNEE_FALLBACK = os.environ.get('JIRA_DEFAULT_ASSIGNEE', '')
 FIELD_ACCEPTANCE          = 'customfield_10033'
 FIELD_STORY_POINTS        = 'customfield_10047'
@@ -108,7 +108,9 @@ def norm_username(display_name):
     return display_name.strip().lower().replace(' ', '.')
 
 
-def lookup_user(creds, display_name):
+def lookup_user(creds, display_name, base_url=None):
+    if base_url is None:
+        base_url = base_url_DEFAULT
     # Search by full display name first
     query = display_name.replace(' ', '%20')
     data = api(creds, 'GET', f'{base_url}/rest/api/3/user/search?query={query}')
@@ -140,7 +142,7 @@ def main():
     parser.add_argument('--board',             required=True,               help='JIRA board ID')
     parser.add_argument('--email',             required=True,               help='JIRA email address')
     parser.add_argument('--token',             required=True,               help='JIRA API token')
-    parser.add_argument('--base-url',          default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--base-url',          default=base_url_DEFAULT, help='JIRA base URL (default: $JIRA_BASE_URL)')
     parser.add_argument('--default-assignee',  default=DEFAULT_ASSIGNEE_FALLBACK, help='JIRA account ID to assign when lookup fails (default: $JIRA_DEFAULT_ASSIGNEE)')
     parser.add_argument('--status',            default='User Story Complete', help='Filter: only create stories with this import status')
     parser.add_argument('--future-only',       action='store_true',         help='Only create stories in future-dated sprints')
@@ -163,13 +165,21 @@ def main():
         i = idx.get(col, -1)
         return row[i].strip() if i >= 0 and i < len(row) else ''
 
-    # Fetch existing JIRA issues (work IDs from first 8 chars of summary)
-    resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', {
-        'jql': f'project={args.project} ORDER BY rank',
-        'maxResults': 500,
-        'fields': ['summary']
-    })
-    jira_work_ids = {i['fields']['summary'][:8] for i in resp.get('issues', [])}
+    # Fetch existing JIRA issues (work IDs from first 8 chars of summary) — paginated
+    jira_work_ids = set()
+    next_token = None
+    while True:
+        payload = {'jql': f'project={args.project} ORDER BY rank', 'maxResults': 100, 'fields': ['summary']}
+        if next_token:
+            payload['nextPageToken'] = next_token
+        resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', payload)
+        batch = resp.get('issues', [])
+        if not batch:
+            break
+        jira_work_ids.update(i['fields']['summary'][:8] for i in batch)
+        next_token = resp.get('nextPageToken')
+        if not next_token:
+            break
 
     # Fetch all sprints for board
     sprint_data = api(creds, 'GET',
@@ -210,7 +220,7 @@ def main():
         # Resolve assignee
         assignee_name = g(row, 'Assigned To')
         if assignee_name not in assignee_cache:
-            account_id = lookup_user(creds, assignee_name)
+            account_id = lookup_user(creds, assignee_name, base_url)
             # Verify the resolved account can actually be assigned; fall back if not
             if account_id and account_id != DEFAULT_ASSIGNEE:
                 test = api(creds, 'GET',
@@ -220,7 +230,7 @@ def main():
                     account_id = None
             assignee_cache[assignee_name] = account_id or DEFAULT_ASSIGNEE or None
             if not account_id:
-                default_label = DEFAULT_ASSIGNEE if DEFAULT_ASSIGNEE else 'none (story will be unassigned)'
+                default_label = f'$JIRA_DEFAULT_ASSIGNEE ({DEFAULT_ASSIGNEE})' if DEFAULT_ASSIGNEE else 'none (story will be unassigned)'
                 print(f'  WARN  Assignee "{assignee_name}" not found or not assignable, defaulting to {default_label}')
         assignee_id = assignee_cache[assignee_name]
 

@@ -34,7 +34,7 @@ import subprocess
 from collections import defaultdict
 from datetime import date, datetime
 
-base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
+base_url_DEFAULT = os.environ.get('JIRA_BASE_URL', 'https://salesforce.atlassian.net')
 DRIVE_FOLDER_DEFAULT  = os.environ.get('DRIVE_FOLDER', '')
 
 STATUS_BADGE = {
@@ -588,7 +588,7 @@ def main():
     parser.add_argument('--board',        required=True,  help='JIRA board ID')
     parser.add_argument('--email',        required=True,  help='JIRA email address')
     parser.add_argument('--token',        required=True,  help='JIRA API token')
-    parser.add_argument('--base-url',     default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--base-url',     default=base_url_DEFAULT, help='JIRA base URL (default: $JIRA_BASE_URL)')
     parser.add_argument('--summary',      default=None,   help='Path to plain-text executive summary file')
     parser.add_argument('--slack-notes',  default=None,
                         help='Path to pre-saved Slack messages file (e.g. data/slack_notes_YYYY-MM-DD.txt)')

@@ -31,7 +31,7 @@ import json
 import os
 import subprocess
 
-base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
+base_url_DEFAULT = os.environ.get('JIRA_BASE_URL', 'https://salesforce.atlassian.net')
 FIELD_AC           = 'customfield_10033'
 FIELD_STORY_POINTS = 'customfield_10047'
 
@@ -83,7 +83,7 @@ def main():
     parser.add_argument('--board',         required=True,  help='JIRA board ID')
     parser.add_argument('--email',         required=True,  help='JIRA email address')
     parser.add_argument('--token',         required=True,  help='JIRA API token')
-    parser.add_argument('--base-url',      default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--base-url',      default=base_url_DEFAULT, help='JIRA base URL (default: $JIRA_BASE_URL)')
     parser.add_argument('--sprint',        default=None,   help='Sprint name override (default: next future sprint)')
     parser.add_argument('--slack-channel', default=os.environ.get('SLACK_CHANNEL'), help='Slack channel ID to post results (overrides $SLACK_CHANNEL)')
     args = parser.parse_args()
@@ -111,10 +111,20 @@ def main():
     print(f'Definition of Ready Check — {sprint_name} ({start} to {end})\n')
 
     # Fetch sprint issues
-    resp = api(creds, 'GET',
-        f'{base_url}/rest/agile/1.0/sprint/{sprint["id"]}/issue'
-        f'?maxResults=100&fields=summary,issuetype,description,{FIELD_AC},{FIELD_STORY_POINTS},status')
-    issues = resp.get('issues', [])
+    issues   = []
+    start_at = 0
+    while True:
+        resp = api(creds, 'GET',
+            f'{base_url}/rest/agile/1.0/sprint/{sprint["id"]}/issue'
+            f'?startAt={start_at}&maxResults=100'
+            f'&fields=summary,issuetype,description,{FIELD_AC},{FIELD_STORY_POINTS},status')
+        batch = resp.get('issues', [])
+        if not batch:
+            break
+        issues.extend(batch)
+        start_at += len(batch)
+        if start_at >= resp.get('total', 0):
+            break
 
     stories = [i for i in issues if i['fields']['issuetype']['name'] == 'Story']
     skipped = [i for i in issues if i['fields']['issuetype']['name'] != 'Story']

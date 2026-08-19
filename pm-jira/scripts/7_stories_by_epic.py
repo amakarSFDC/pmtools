@@ -21,7 +21,7 @@ from collections import defaultdict
 from datetime import datetime
 
 # ── Config ──────────────────────────────────────────────────────────────────
-base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
+base_url_DEFAULT = os.environ.get('JIRA_BASE_URL', 'https://salesforce.atlassian.net')
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -72,7 +72,7 @@ def main():
     parser.add_argument('--project',  required=True,                          help='JIRA project key (e.g. IGSIFP)')
     parser.add_argument('--email',    required=True,                          help='JIRA email address')
     parser.add_argument('--token',    required=True,                          help='JIRA API token')
-    parser.add_argument('--base-url', default=base_url_DEFAULT,          help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--base-url', default=base_url_DEFAULT,          help='JIRA base URL (default: $JIRA_BASE_URL)')
     parser.add_argument('--output',   default='reports/JIRA_Stories_by_Epic.xls', help='Output .xls report path')
     args = parser.parse_args()
 
@@ -80,12 +80,24 @@ def main():
     base_url = args.base_url
 
     # Fetch all epics
-    epic_resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', {
-        'jql':        f'project={args.project} AND issuetype = Epic ORDER BY summary',
-        'maxResults': 100,
-        'fields':     ['summary', 'status']
-    })
-    epic_map = {i['key']: i['fields']['summary'] for i in epic_resp.get('issues', [])}
+    epic_map   = {}
+    next_token = None
+    while True:
+        payload = {
+            'jql':        f'project={args.project} AND issuetype = Epic ORDER BY summary',
+            'maxResults': 100,
+            'fields':     ['summary', 'status']
+        }
+        if next_token:
+            payload['nextPageToken'] = next_token
+        epic_resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', payload)
+        batch = epic_resp.get('issues', [])
+        if not batch:
+            break
+        epic_map.update({i['key']: i['fields']['summary'] for i in batch})
+        next_token = epic_resp.get('nextPageToken')
+        if not next_token:
+            break
     print(f'Epics found: {len(epic_map)}')
 
     # Fetch all non-epic stories with pagination

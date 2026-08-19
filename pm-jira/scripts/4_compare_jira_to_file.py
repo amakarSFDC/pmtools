@@ -30,7 +30,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 
 # ── Config ──────────────────────────────────────────────────────────────────
-base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
+base_url_DEFAULT = os.environ.get('JIRA_BASE_URL', 'https://salesforce.atlassian.net')
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -91,7 +91,7 @@ def main():
     parser.add_argument('--all',      action='store_true',       help='Compare entire project (all JIRA stories, not just specified sprints)')
     parser.add_argument('--email',    required=True,             help='JIRA email address')
     parser.add_argument('--token',    required=True,             help='JIRA API token')
-    parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $JIRA_BASE_URL)')
     parser.add_argument('--today',    default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
     args = parser.parse_args()
 
@@ -220,17 +220,24 @@ def main():
         if not sprint_ids:
             print('ERROR: No matching sprint IDs found in JIRA. Check sprint names.')
         else:
-            resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', {
-                'jql': f'project={args.project} AND sprint in ({",".join(sprint_ids)}) ORDER BY rank',
-                'maxResults': 200,
-                'fields': ['summary', 'status']
-            })
-
-            jira_data = {}
-            for issue in resp.get('issues', []):
-                summary = issue['fields']['summary']
-                work_id = summary[:8]
-                jira_data[work_id] = (issue['key'], issue['fields']['status']['name'])
+            jira_data  = {}
+            next_token = None
+            while True:
+                payload = {
+                    'jql':        f'project={args.project} AND sprint in ({",".join(sprint_ids)}) ORDER BY rank',
+                    'maxResults': 100,
+                    'fields':     ['summary', 'status']
+                }
+                if next_token:
+                    payload['nextPageToken'] = next_token
+                resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', payload)
+                for issue in resp.get('issues', []):
+                    summary = issue['fields']['summary']
+                    work_id = summary[:8]
+                    jira_data[work_id] = (issue['key'], issue['fields']['status']['name'])
+                next_token = resp.get('nextPageToken')
+                if not next_token or not resp.get('issues'):
+                    break
 
             all_wids = sorted(set(list(import_data.keys()) + list(jira_data.keys())))
 
@@ -293,16 +300,29 @@ def main():
 
     future_sprint_ids = [str(s['id']) for s in future_sprints]
 
-    resp2 = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', {
-        'jql': f'project={args.project} AND sprint in ({",".join(future_sprint_ids)}) ORDER BY rank',
-        'maxResults': 500,
-        'fields': ['summary', 'status', 'customfield_10020']
-    })
+    future_issues  = []
+    next_token     = None
+    while True:
+        payload = {
+            'jql':        f'project={args.project} AND sprint in ({",".join(future_sprint_ids)}) ORDER BY rank',
+            'maxResults': 100,
+            'fields':     ['summary', 'status', 'customfield_10020']
+        }
+        if next_token:
+            payload['nextPageToken'] = next_token
+        resp2 = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', payload)
+        batch = resp2.get('issues', [])
+        if not batch:
+            break
+        future_issues.extend(batch)
+        next_token = resp2.get('nextPageToken')
+        if not next_token:
+            break
 
     removed        = []
     sprint_changes = []
 
-    for issue in resp2.get('issues', []):
+    for issue in future_issues:
         summary   = issue['fields']['summary']
         wid       = summary[:8]
         issue_key = issue['key']

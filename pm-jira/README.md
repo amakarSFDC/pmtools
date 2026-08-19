@@ -181,9 +181,9 @@ python3 scripts/4_compare_jira_to_file.py \
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
 | `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
-| `--sprints` | Yes | — | One or more sprint base names (without date suffix, space-separated) |
+| `--sprints` | Yes | — | One or more sprint names from the import file (with date suffix, space-separated) |
 
-Note: `--sprints` accepts multiple values. Sprint names should be the base name without the date suffix (e.g. `2026.07c-Comp Systems`, not `2026.07c-Comp Systems 7/29 - 8/11`).
+Note: `--sprints` accepts multiple values. Sprint names must match exactly as they appear in the import file, **including the date suffix** (e.g. `"2026.07c-Comp Systems 7/29 - 8/11"`, not `"2026.07c-Comp Systems"`). The date suffix is stripped internally for matching against JIRA sprint names.
 
 The future sprint analysis section also identifies stories in JIRA that no longer appear in the import file (removed from scope) and stories whose sprint assignments differ between JIRA and the import — and applies sprint changes automatically.
 
@@ -249,7 +249,7 @@ Report columns: Work ID, JIRA Key, Summary, JIRA Status, Import Status, Import D
 
 If a story triggers more than one check, all applicable flags and actions appear in their respective columns.
 
-The script header in `scripts/5_identify_source_file_updates.py` also lists the six checks for quick reference.
+The script header in `scripts/5_identify_source_file_updates.py` also lists the seven checks for quick reference.
 
 ---
 

@@ -39,7 +39,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 
 # ── Config ──────────────────────────────────────────────────────────────────
-base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
+base_url_DEFAULT = os.environ.get('JIRA_BASE_URL', 'https://salesforce.atlassian.net')
 FIELD_STORY_POINTS = 'customfield_10047'
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -154,7 +154,7 @@ def main():
     parser.add_argument('--sprint',   default=None,                    help='Sprint name (without date suffix, e.g. "2026.07c-Comp Systems"); defaults to active sprint')
     parser.add_argument('--email',    required=True,                   help='JIRA email address')
     parser.add_argument('--token',    required=True,                   help='JIRA API token')
-    parser.add_argument('--base-url', default=base_url_DEFAULT,  help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--base-url', default=base_url_DEFAULT,  help='JIRA base URL (default: $JIRA_BASE_URL)')
     parser.add_argument('--output',   default='reports/source_update_report.xls', help='Output .xls report filename')
     parser.add_argument('--today',    default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
     args = parser.parse_args()
@@ -213,28 +213,37 @@ def main():
     args.sprint = sprint_name
 
     # Fetch JIRA issues for sprint
-    resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', {
-        'jql': f'project={args.project} AND sprint={sprint_id} ORDER BY rank',
-        'maxResults': 200,
-        'fields': ['summary', 'status', 'duedate', 'assignee', FIELD_STORY_POINTS]
-    })
-
-    jira_data = {}
-    for issue in resp.get('issues', []):
-        f       = issue['fields']
-        summary = f.get('summary', '')
-        wid     = summary[:8]
-        a       = f.get('assignee')
-        pts     = f.get(FIELD_STORY_POINTS)
-        if wid.startswith('W-'):
-            jira_data[wid] = {
-                'key':      issue['key'],
-                'status':   f['status']['name'],
-                'duedate':  f.get('duedate') or '',
-                'summary':  summary,
-                'assignee': a['displayName'] if a else '',
-                'points':   pts,
-            }
+    jira_data  = {}
+    next_token = None
+    while True:
+        payload = {
+            'jql':        f'project={args.project} AND sprint={sprint_id} ORDER BY rank',
+            'maxResults': 100,
+            'fields':     ['summary', 'status', 'duedate', 'assignee', FIELD_STORY_POINTS]
+        }
+        if next_token:
+            payload['nextPageToken'] = next_token
+        resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', payload)
+        if not resp.get('issues'):
+            break
+        next_token = resp.get('nextPageToken')
+        for issue in resp.get('issues', []):
+            f       = issue['fields']
+            summary = f.get('summary', '')
+            wid     = summary[:8]
+            a       = f.get('assignee')
+            pts     = f.get(FIELD_STORY_POINTS)
+            if wid.startswith('W-'):
+                jira_data[wid] = {
+                    'key':      issue['key'],
+                    'status':   f['status']['name'],
+                    'duedate':  f.get('duedate') or '',
+                    'summary':  summary,
+                    'assignee': a['displayName'] if a else '',
+                    'points':   pts,
+                }
+        if not next_token:
+            break
 
     # Run checks
     report_rows = []

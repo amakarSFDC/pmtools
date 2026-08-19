@@ -22,7 +22,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 
 # ── Config ──────────────────────────────────────────────────────────────────
-base_url_DEFAULT = os.environ.get('base_url', 'https://salesforce.atlassian.net')
+base_url_DEFAULT = os.environ.get('JIRA_BASE_URL', 'https://salesforce.atlassian.net')
 SKIP_PATTERNS = ['_NO_BUILD_REQUIRED', 'MOCK']
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -92,7 +92,7 @@ def main():
     parser.add_argument('--project',  required=True,        help='JIRA project key (e.g. IGSIFP)')
     parser.add_argument('--email',    required=True,        help='JIRA email address')
     parser.add_argument('--token',    required=True,        help='JIRA API token')
-    parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $base_url)')
+    parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $JIRA_BASE_URL)')
     parser.add_argument('--today',    default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
     args = parser.parse_args()
 
