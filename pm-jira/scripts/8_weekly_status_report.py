@@ -3,18 +3,29 @@
 Generate Weekly Status Summary
 -------------------------------
 Queries the active JIRA sprint and generates a styled HTML leadership
-status report with executive summary, issue register, burn bars,
-risk register, and priority actions.
+status report with an editable executive summary, issue register, burn
+bars, workload bars, risk register, accomplishments list, and an optional
+"Team Communications Highlights" section from Slack and Google Drive notes.
 
-Optionally reads pre-saved Slack channel messages and Google Drive standup
-notes to populate a "Team Communications Highlights" section.
+Risk model — effective progress (used for at-risk determination):
+  Closed                              = 1.0 credit
+  Ready for Test / Ready for Demo / In Test = 0.5 credit (near-done)
+  In Progress with future due date    = 0.25 credit
+  Blocked / On Hold                   = 0 credit (flagged HIGH risk)
+  Past-due open                       = 0 credit (flagged HIGH risk)
+  Sprint flagged AT RISK when: elapsed% - effective% > 15
+
+Executive summary is rendered as a contenteditable block in the HTML
+output with Save (download .txt), Copy, and Reset buttons.
 
 Workflow for Slack/Drive integration:
-  1. Before running, have Claude read Slack channel C06PHK1DPH7 and save to
+  1. Have Claude read Slack channel C06PHK1DPH7 and save to
      data/slack_notes_YYYY-MM-DD.txt (Claude MCP → file).
   2. Optionally have Claude read Google Drive standup notes folder and save to
      data/standup_notes_YYYY-MM-DD.txt (when Drive network is available).
   3. Pass the saved files to this script via --slack-notes and --drive-notes.
+     Auto-detected if files named data/slack_notes_YYYY-MM-DD.txt /
+     data/standup_notes_YYYY-MM-DD.txt exist for today's date.
 
 Usage:
     python3 8_weekly_status_report.py \
@@ -23,8 +34,9 @@ Usage:
         --email "$JIRA_EMAIL" \
         --token "$JIRA_API_TOKEN" \
         --summary data/executive_summary.txt \
-        --slack-notes data/slack_notes_2026-08-13.txt \
-        --output reports/IGSIFP_LeadershipStatusReport_2026-08-13.html
+        --slack-notes data/slack_notes_2026-08-21.txt \
+        --drive-notes data/standup_notes_2026-08-21.txt \
+        --output reports/IGSIFP_LeadershipStatusReport_2026-08-21.html
 """
 
 import argparse
@@ -32,7 +44,7 @@ import json
 import os
 import subprocess
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 base_url_DEFAULT = os.environ.get('JIRA_BASE_URL', 'https://salesforce.atlassian.net')
 DRIVE_FOLDER_DEFAULT  = os.environ.get('DRIVE_FOLDER', '')
@@ -41,17 +53,27 @@ STATUS_BADGE = {
     'Closed':                  ('badge-green',  'Closed'),
     'In Progress':             ('badge-blue',   'In Progress'),
     'Blocked':                 ('badge-red',    'Blocked'),
+    'On Hold':                 ('badge-red',    'On Hold'),
     'Open':                    ('badge-grey',   'Open'),
     'Ready for Implementation':('badge-purple', 'Ready'),
     'In Review':               ('badge-blue',   'In Review'),
     'QA In Progress':          ('badge-amber',  'QA In Progress'),
+    'In Test':                 ('badge-amber',  'In Test'),
+    'Ready for Test':          ('badge-green',  'Ready for Test'),
+    'Ready for Demo':          ('badge-green',  'Ready for Demo'),
 }
 
 RISK_BADGE = {
-    'Blocked':    ('badge-red',    'HIGH'),
-    'past_due':   ('badge-red',    'HIGH'),
-    'on_track':   ('badge-green',  'ON TRACK'),
+    'Blocked':            ('badge-red',    'HIGH'),
+    'On Hold':            ('badge-red',    'HIGH'),
+    'past_due':           ('badge-red',    'HIGH'),
+    'near_done':          ('badge-green',  'NEAR DONE'),
+    'in_progress_future': ('badge-blue',   'IN PROGRESS'),
+    'on_track':           ('badge-grey',   'ON TRACK'),
 }
+
+# Stories in these statuses are near-done and reduce sprint risk
+NEAR_DONE_STATUSES = {'Ready for Test', 'Ready for Demo', 'In Test'}
 
 ACCOMPLISHMENT_KEYWORDS = [
     'completed', 'closed', 'delivered', 'shipped', 'done', 'finished',
@@ -193,11 +215,27 @@ def categorize_messages(messages):
     return accomplishments, risks, issues
 
 
-def build_highlights_html(slack_messages, drive_messages, drive_folder):
+def filter_to_week(messages, week_start, week_end):
+    """Keep only messages whose date falls within [week_start, week_end] (inclusive)."""
+    filtered = []
+    for date_str, author, text in messages:
+        try:
+            msg_date = date.fromisoformat(date_str)
+            if week_start <= msg_date <= week_end:
+                filtered.append((date_str, author, text))
+        except (ValueError, TypeError):
+            pass  # drop messages with missing or unparseable dates
+    return filtered
+
+
+def build_highlights_html(slack_messages, drive_messages, drive_folder, week_start=None, week_end=None):
     """Build HTML for the Team Communications Highlights section."""
     all_messages = slack_messages + drive_messages
     if not all_messages:
         return ''
+
+    if week_start and week_end:
+        all_messages = filter_to_week(all_messages, week_start, week_end)
 
     accomplishments, risks, issues = categorize_messages(all_messages)
 
@@ -255,10 +293,15 @@ def build_highlights_html(slack_messages, drive_messages, drive_folder):
         summary_html = accom_html + risks_html + issues_html
 
     source_label = ' + '.join(sources)
+    week_range_label = ''
+    if week_start and week_end:
+        def fmt_d(d):
+            return d.strftime('%b %-d')
+        week_range_label = f' · {fmt_d(week_start)} – {fmt_d(week_end)}'
     return f'''
   <div class="section-block">
-    <div class="section-title">Team Communications Highlights — {source_label}</div>
-    <p style="font-size:12px;color:#555;margin-bottom:14px;">Auto-extracted from {len(all_messages)} messages. Items are keyword-matched; review for accuracy before sharing.</p>
+    <div class="section-title">Team Communications Highlights — {source_label}{week_range_label}</div>
+    <p style="font-size:12px;color:#555;margin-bottom:14px;">Auto-extracted from {len(all_messages)} messages this reporting week. Items are keyword-matched; review for accuracy before sharing.</p>
     {summary_html}{drive_note}
   </div>'''
 
@@ -278,10 +321,22 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
     # ── Story metrics ──────────────────────────────────────────────────────────
     total       = len(issues)
     closed      = [i for i in issues if i['fields']['status']['name'] == 'Closed']
-    blocked     = [i for i in issues if i['fields']['status']['name'] == 'Blocked']
+    near_done   = [i for i in issues if i['fields']['status']['name'] in NEAR_DONE_STATUSES]
+    blocked     = [i for i in issues if i['fields']['status']['name'] in ('Blocked', 'On Hold')]
     open_issues = [i for i in issues if i['fields']['status']['name'] not in ('Closed',)]
     closed_pct  = round(len(closed) / total * 100) if total else 0
-    at_risk     = elapsed_pct - closed_pct > 15
+    # In Progress stories with a future due date count as quarter-credit (active work, not overdue)
+    in_progress_future = [
+        i for i in open_issues
+        if i['fields']['status']['name'] == 'In Progress'
+        and i not in blocked
+        and (i['fields'].get('duedate') or '') >= today.isoformat()
+    ]
+    # Effective progress: closed=1.0, near-done=0.5, in-progress w/ future due date=0.25
+    effective_pct = round(
+        (len(closed) + len(near_done) * 0.5 + len(in_progress_future) * 0.25) / total * 100
+    ) if total else 0
+    at_risk     = elapsed_pct - effective_pct > 15
 
     start_fmt = fmt_date(start_str)
     end_fmt   = fmt_date(end_str)
@@ -306,7 +361,7 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
     def row_class(issue):
         s = issue['fields']['status']['name']
         dd = (issue['fields'].get('duedate') or '')[:10]
-        if s == 'Blocked':
+        if s in ('Blocked', 'On Hold'):
             return ' class="blocked-row"'
         if s == 'Closed':
             return ' style="background:#f0faf4;"'
@@ -361,6 +416,17 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
   ul.bullet { margin: 8px 0 0 16px; }
   ul.bullet li { font-size: 12px; color: #444; line-height: 1.7; }
   @media (max-width: 900px) { .card-grid { grid-template-columns: repeat(2,1fr); } .two-col { grid-template-columns: 1fr; } }
+  .exec-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .exec-toolbar button { font-size: 11px; font-weight: 600; padding: 4px 12px; border-radius: 4px; border: 1px solid #ccc; cursor: pointer; background: #f5f7fa; color: #333; transition: background 0.15s; }
+  .exec-toolbar button:hover { background: #e8ecf2; }
+  .exec-toolbar button.primary { background: #1b263b; color: #fff; border-color: #1b263b; }
+  .exec-toolbar button.primary:hover { background: #0d1b2a; }
+  .exec-toolbar .exec-status { font-size: 11px; color: #888; margin-left: 4px; }
+  .exec-editable { outline: none; border: 2px dashed transparent; border-radius: 6px; padding: 8px; transition: border-color 0.2s, background 0.2s; min-height: 60px; }
+  .exec-editable:focus { border-color: #415a77; background: #f8fafc; }
+  .exec-editable p { font-size: 14px; line-height: 1.9; color: #1a1a2e; margin-bottom: 14px; }
+  .exec-editable p:last-child { margin-bottom: 0; }
+  .exec-edit-hint { font-size: 11px; color: #aaa; margin-top: 8px; }
 '''
 
     # ── Issue register rows ───────────────────────────────────────────────────
@@ -372,7 +438,11 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
         a       = f.get('assignee')
         assignee= a['displayName'] if a else '—'
         dd      = fmt_date(f.get('duedate', ''))
-        risk_key= 'Blocked' if status == 'Blocked' else ('past_due' if i in past_due else 'on_track')
+        risk_key= (status if status in ('Blocked', 'On Hold')
+                   else 'near_done' if status in NEAR_DONE_STATUSES
+                   else 'past_due' if i in past_due
+                   else 'in_progress_future' if i in in_progress_future
+                   else 'on_track')
         rc      = row_class(i)
         return f'''        <tr{rc}>
           <td><strong>{key}</strong></td>
@@ -387,15 +457,22 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
 
     # ── Burn bars ─────────────────────────────────────────────────────────────
     burn_color   = '#e67e22' if at_risk else '#27ae60'
-    burn_bars    = bar('Time Elapsed',    elapsed_pct, '#415a77', f'Day {elapsed_days} of {total_days}')
-    burn_bars   += bar('Stories Closed',  closed_pct,  burn_color, f'{len(closed)} of {total}',
+    burn_bars    = bar('Time Elapsed',      elapsed_pct,   '#415a77', f'Day {elapsed_days} of {total_days}')
+    burn_bars   += bar('Stories Closed',    closed_pct,    burn_color, f'{len(closed)} of {total}',
                        '#e67e22' if at_risk else '#27ae60')
+    if near_done:
+        nd_pct     = round(len(near_done) / total * 100)
+        burn_bars += bar('Near Done',        nd_pct,        '#27ae60', f'{len(near_done)} of {total}', '#27ae60')
+    if in_progress_future:
+        ip_pct     = round(len(in_progress_future) / total * 100)
+        burn_bars += bar('In Progress',      ip_pct,        '#415a77', f'{len(in_progress_future)} future due', '#415a77')
+    eff_detail = f'{len(closed)}×1 + {len(near_done)}×½ + {len(in_progress_future)}×¼'
+    burn_bars   += bar('Effective Progress', effective_pct, '#27ae60', eff_detail, '#27ae60')
     expected_pct = elapsed_pct
-    burn_bars   += bar('Expected at Pace', expected_pct, '#27ae60', f'~{round(expected_pct/100*total)} of {total}',
-                       '#27ae60')
+    burn_bars   += bar('Expected at Pace',  expected_pct,  '#415a77', f'~{round(expected_pct/100*total)} of {total}')
     if blocked:
         block_pct = round(len(blocked) / total * 100)
-        burn_bars += bar('Blocked', block_pct, '#c0392b', f'{len(blocked)} of {total}', '#c0392b')
+        burn_bars += bar('Blocked / On Hold', block_pct,   '#c0392b', f'{len(blocked)} of {total}', '#c0392b')
 
     # ── Workload bars ─────────────────────────────────────────────────────────
     workload_bars = ''
@@ -419,14 +496,15 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
         f       = i['fields']
         a       = f.get('assignee')
         owner   = a['displayName'] if a else '—'
+        status_label = f['status']['name']
         risk_rows += f'''        <tr>
           <td style="font-weight:700">{rn}</td>
           <td><span class="badge badge-red">HIGH</span></td>
           <td><strong>{i["key"]} — {f.get("summary","")}</strong><br>
-              <span style="font-size:11px;color:#555;">Status: Blocked. Review blocker details in JIRA and confirm resolution timeline.</span></td>
+              <span style="font-size:11px;color:#555;">Status: {status_label}. Review blocker details in JIRA and confirm resolution timeline.</span></td>
           <td>{i["key"]}</td>
           <td>{owner}</td>
-          <td style="font-size:12px">Confirm blocker owner and resolution date. If unresolved by sprint end, move to next sprint and communicate to stakeholders.</td>
+          <td style="font-size:12px">Confirm owner and resolution date. If unresolved by sprint end, move to next sprint and communicate to stakeholders.</td>
         </tr>'''
         rn += 1
     for i in past_due:
@@ -452,10 +530,10 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
     # ── Critical banner ───────────────────────────────────────────────────────
     banner = ''
     if at_risk:
-        gap = elapsed_pct - closed_pct
+        gap = elapsed_pct - effective_pct
         banner = f'''<div class="critical-banner">
   <span style="font-size:18px;">⚠️</span>
-  SPRINT AT RISK: Day {elapsed_days} of {total_days} ({elapsed_pct}% elapsed) — only {closed_pct}% of stories closed ({len(closed)} of {total}). Velocity is {gap} points behind expected pace.
+  SPRINT AT RISK: Day {elapsed_days} of {total_days} ({elapsed_pct}% elapsed) — effective progress {effective_pct}% vs {elapsed_pct}% expected (gap: {gap}pp). {len(closed)} closed · {len(near_done)} near-done · {len(in_progress_future)} in progress (future due) · {len(blocked)} blocked/on-hold of {total} total.
 </div>'''
 
     # ── HTML assembly ─────────────────────────────────────────────────────────
@@ -484,18 +562,18 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
   <div class="card-grid" style="margin-top:4px;">
     <div class="card {'red' if at_risk else 'green'}">
       <div class="label">Sprint Progress</div>
-      <div class="value">{closed_pct}%</div>
-      <div class="sub">{len(closed)} closed of {total} · Day {elapsed_days} of {total_days} ({elapsed_pct}% elapsed)</div>
+      <div class="value">{effective_pct}%</div>
+      <div class="sub">{len(closed)} closed · {len(near_done)} near-done · Day {elapsed_days} of {total_days} ({elapsed_pct}% elapsed)</div>
     </div>
     <div class="card {'red' if blocked else 'green'}">
-      <div class="label">Blocked Stories</div>
+      <div class="label">Blocked / On Hold</div>
       <div class="value">{len(blocked)}</div>
-      <div class="sub">{'· '.join(i["key"] for i in blocked) if blocked else 'No blocked stories'}</div>
+      <div class="sub">{'· '.join(i["key"] for i in blocked) if blocked else 'No blocked or on-hold stories'}</div>
     </div>
-    <div class="card {'orange' if len(open_issues)-len(blocked) > 3 else 'amber'}">
-      <div class="label">Open / In Progress</div>
-      <div class="value">{len(open_issues)}</div>
-      <div class="sub">{len(open_issues) - len(blocked)} active · {len(blocked)} blocked</div>
+    <div class="card {'amber' if near_done else 'green'}">
+      <div class="label">Near Done</div>
+      <div class="value">{len(near_done)}</div>
+      <div class="sub">Ready for Test/Demo · In Test — will close quickly</div>
     </div>
     <div class="card green">
       <div class="label">Closed This Sprint</div>
@@ -506,7 +584,14 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
 
   <div class="section-block">
     <div class="section-title">Executive Summary</div>
-    {exec_summary}
+    <div class="exec-toolbar">
+      <button class="primary" onclick="saveExec()">💾 Save to File</button>
+      <button onclick="copyExec()">📋 Copy Text</button>
+      <button onclick="resetExec()">↩ Reset</button>
+      <span class="exec-status" id="exec-status"></span>
+    </div>
+    <div class="exec-editable" id="exec-body" contenteditable="true">{exec_summary}</div>
+    <div class="exec-edit-hint">Click anywhere in the summary to edit. Use Save to download your changes as a .txt file.</div>
   </div>
 
   <div class="section-block">
@@ -576,6 +661,55 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
   <span>{sprint_name} · {start_fmt} – {end_fmt}</span>
 </div>
 
+<script>
+  const ORIGINAL_HTML = document.getElementById('exec-body').innerHTML;
+
+  function setStatus(msg, color) {{
+    const s = document.getElementById('exec-status');
+    s.textContent = msg;
+    s.style.color = color || '#888';
+    if (msg) setTimeout(() => {{ if (s.textContent === msg) s.textContent = ''; }}, 3000);
+  }}
+
+  function saveExec() {{
+    const el = document.getElementById('exec-body');
+    // Convert <p> tags back to plain paragraphs separated by blank lines
+    let text = '';
+    el.querySelectorAll('p').forEach(p => {{ text += p.innerText.trim() + '\\n\\n'; }});
+    if (!text.trim()) text = el.innerText.trim();
+    const blob = new Blob([text.trim()], {{ type: 'text/plain' }});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'executive_summary_{today}.txt';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setStatus('Saved!', '#27ae60');
+  }}
+
+  function copyExec() {{
+    const el = document.getElementById('exec-body');
+    let text = '';
+    el.querySelectorAll('p').forEach(p => {{ text += p.innerText.trim() + '\\n\\n'; }});
+    if (!text.trim()) text = el.innerText.trim();
+    navigator.clipboard.writeText(text.trim()).then(
+      () => setStatus('Copied to clipboard!', '#27ae60'),
+      () => setStatus('Copy failed — select text manually.', '#c0392b')
+    );
+  }}
+
+  function resetExec() {{
+    if (confirm('Reset to the original generated summary? Your edits will be lost.')) {{
+      document.getElementById('exec-body').innerHTML = ORIGINAL_HTML;
+      setStatus('Reset to original.', '#888');
+    }}
+  }}
+
+  // Auto-mark edited state
+  document.getElementById('exec-body').addEventListener('input', () => {{
+    setStatus('Unsaved changes', '#e67e22');
+  }});
+</script>
+
 </body>
 </html>'''
     return html
@@ -598,9 +732,11 @@ def main():
                         help='Google Drive folder ID for standup notes (default: $DRIVE_FOLDER)')
     parser.add_argument('--output',       default=None,   help='Output HTML path (default: reports/{PROJECT}_LeadershipStatusReport_YYYY-MM-DD.html)')
     parser.add_argument('--today',        default=None,   help='Override today\'s date (YYYY-MM-DD)')
+    parser.add_argument('--week-start',   default=None,   help='Override reporting week start (YYYY-MM-DD); defaults to Monday of current week')
     args = parser.parse_args()
 
     today = date.fromisoformat(args.today) if args.today else date.today()
+    week_start = date.fromisoformat(args.week_start) if args.week_start else today - timedelta(days=today.weekday())
     creds = f'{args.email}:{args.token}'
     base_url = args.base_url
 
@@ -668,7 +804,10 @@ def main():
             print(f'  Drive folder configured ({args.drive_folder}) but no notes file found.')
             print(f'  To include Drive data: have Claude read the folder and save to data/standup_notes_{today}.txt')
 
-    highlights_html = build_highlights_html(slack_messages, drive_messages, args.drive_folder)
+    highlights_html = build_highlights_html(
+        slack_messages, drive_messages, args.drive_folder,
+        week_start=week_start, week_end=today,
+    )
 
     exec_summary = read_executive_summary(args.summary)
     html = generate_html(sprint, issues, exec_summary, today, highlights_html,

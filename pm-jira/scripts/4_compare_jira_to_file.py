@@ -3,18 +3,22 @@
 Compare JIRA to File
 -----------------------
 Compares Work ID and status between an import file and JIRA for one or
-more specified sprints. Also identifies future-sprint scope changes:
+more specified sprints. When a Work ID is not found in the target sprint(s),
+the full project (including backlog) is searched before reporting it MISSING.
+
+Also identifies future-sprint scope changes:
   - Stories in future JIRA sprints that no longer exist in the import file
   - Stories assigned to a different sprint in the import file vs JIRA
-    (sprint mismatches are automatically updated in JIRA)
+    (reported as PENDING by default; pass --apply to update JIRA)
 
 Usage:
     # Status comparison for specific sprints
     python3 4_compare_jira_to_file.py --file import.xls --project IGSIFP \
-        --sprints "2026.07b-Comp Systems 7/15 - 7/28" "2026.07c-Comp Systems 7/29 - 8/11"
+        --board 18086 --email "$JIRA_EMAIL" --token "$JIRA_API_TOKEN" \
+        --sprints "2026.07c-Comp Systems 7/29 - 8/11" "2026.08a-Comp Systems 8/12 - 8/25"
 
-    # Future sprint analysis only (no --sprints required)
-    python3 4_compare_jira_to_file.py --file import.xls --project IGSIFP --board 18086
+    # Apply sprint changes after reviewing:
+    python3 4_compare_jira_to_file.py ... --apply
 
 Requirements:
     - import file must be HTML-formatted .xls with standard columns
@@ -93,6 +97,7 @@ def main():
     parser.add_argument('--token',    required=True,             help='JIRA API token')
     parser.add_argument('--base-url', default=base_url_DEFAULT, help='JIRA base URL (default: $JIRA_BASE_URL)')
     parser.add_argument('--today',    default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
+    parser.add_argument('--apply',    action='store_true',       help='Apply sprint assignment changes to JIRA (default: report only)')
     args = parser.parse_args()
 
     creds = f'{args.email}:{args.token}'
@@ -220,6 +225,31 @@ def main():
         if not sprint_ids:
             print('ERROR: No matching sprint IDs found in JIRA. Check sprint names.')
         else:
+            # Fetch all project issues (including backlog) to detect stories outside the sprint
+            all_jira  = {}
+            next_token = None
+            while True:
+                payload = {
+                    'jql':        f'project={args.project} AND issuetype != Epic ORDER BY rank',
+                    'maxResults': 100,
+                    'fields':     ['summary', 'status', 'customfield_10020']
+                }
+                if next_token:
+                    payload['nextPageToken'] = next_token
+                resp = api(creds, 'POST', f'{base_url}/rest/api/3/search/jql', payload)
+                for issue in resp.get('issues', []):
+                    summary  = issue['fields']['summary']
+                    work_id  = summary[:8]
+                    sf       = issue['fields'].get('customfield_10020') or []
+                    if isinstance(sf, dict):
+                        sf = [sf]
+                    loc = strip_date(sf[-1].get('name', '')) if sf else '(backlog)'
+                    all_jira[work_id] = (issue['key'], issue['fields']['status']['name'], loc)
+                next_token = resp.get('nextPageToken')
+                if not next_token or not resp.get('issues'):
+                    break
+
+            # Sprint-scoped fetch for match/mismatch reporting
             jira_data  = {}
             next_token = None
             while True:
@@ -254,8 +284,15 @@ def main():
                 jira_key, jira_status = jira_data.get(wid, ('NOT IN JIRA', 'NOT IN JIRA'))
 
                 if jira_status == 'NOT IN JIRA':
-                    match = 'MISSING'
-                    counts['missing'] += 1
+                    # Check backlog and other sprints before declaring truly missing
+                    backlog_hit = all_jira.get(wid)
+                    if backlog_hit:
+                        jira_key, jira_status, jira_loc = backlog_hit
+                        match = f'IN JIRA ({jira_loc})'
+                        counts['wrong_sprint'] += 1
+                    else:
+                        match = 'MISSING'
+                        counts['missing'] += 1
                 elif not imp_status:
                     # Not in target sprints — check if it exists in a different sprint in the import
                     other_sprint = all_import_data.get(wid)
@@ -355,19 +392,23 @@ def main():
     else:
         print('\nNo stories removed from scope.')
 
-    # Report and apply sprint changes
+    # Report and optionally apply sprint changes
     if sprint_changes:
-        print(f'\nSPRINT ASSIGNMENT CHANGES ({len(sprint_changes)}):')
+        label = 'SPRINT ASSIGNMENT CHANGES' if args.apply else 'SPRINT ASSIGNMENT CHANGES (report only — pass --apply to update JIRA)'
+        print(f'\n{label} ({len(sprint_changes)}):')
         print(f'  {"Work ID":<12} {"JIRA Key":<12} {"Current JIRA Sprint":<35} {"Import Sprint":<35} {"Updated?"}')
         print(f'  {"-" * 120}')
         for wid, key, summary, old_sprint, new_sprint, new_sprint_id in sprint_changes:
-            if new_sprint_id:
-                move_resp = api(creds, 'POST',
-                    f'{base_url}/rest/agile/1.0/sprint/{new_sprint_id}/issue',
-                    {'issues': [key]})
-                updated = 'FAILED: ' + str(move_resp) if move_resp else 'UPDATED'
+            if args.apply:
+                if new_sprint_id:
+                    move_resp = api(creds, 'POST',
+                        f'{base_url}/rest/agile/1.0/sprint/{new_sprint_id}/issue',
+                        {'issues': [key]})
+                    updated = 'FAILED: ' + str(move_resp) if move_resp else 'UPDATED'
+                else:
+                    updated = f'SKIP — "{new_sprint}" not found in JIRA'
             else:
-                updated = f'SKIP — "{new_sprint}" not found in JIRA'
+                updated = 'PENDING'
             print(f'  {wid:<12} {key:<12} {old_sprint:<35} {new_sprint:<35} {updated}')
     else:
         print('\nNo sprint assignment changes needed.')

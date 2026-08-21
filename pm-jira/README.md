@@ -126,7 +126,7 @@ python3 scripts/3_create_stories.py \
 | `--token` | Yes | — | Atlassian API token |
 | `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
 | `--default-assignee` | No | `$JIRA_DEFAULT_ASSIGNEE` | JIRA account ID fallback when assignee lookup fails |
-| `--status` | No | `User Story Complete` | Only create stories matching this import status |
+| `--status` | No | `User Story Complete` | Only create stories matching this import status; pass `--status ""` to create stories of any status |
 | `--future-only` | No | off | Only create stories in future-dated sprints |
 | `--today` | No | system date | Override today's date (YYYY-MM-DD) for future sprint filtering |
 
@@ -159,9 +159,10 @@ This normalization ensures names like `Brandon Winter` correctly resolve to the 
 ## Script 4 — Compare JIRA to File
 
 Compares Work ID and status between the import file and JIRA for one or
-more sprints. Reports matches, mismatches, and stories missing from JIRA.
-Also detects sprint assignment changes for future sprints and applies them automatically.
-Prints results to the terminal.
+more sprints. Reports matches, mismatches, and stories not found in the
+target sprint (including those in the backlog or other sprints).
+Also detects future sprint assignment changes — reported only by default,
+applied when `--apply` is passed. Prints results to the terminal.
 
 ```bash
 python3 scripts/4_compare_jira_to_file.py \
@@ -182,10 +183,13 @@ python3 scripts/4_compare_jira_to_file.py \
 | `--token` | Yes | — | Atlassian API token |
 | `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
 | `--sprints` | Yes | — | One or more sprint names from the import file (with date suffix, space-separated) |
+| `--apply` | No | off | Apply sprint assignment changes to JIRA (default: report only) |
 
 Note: `--sprints` accepts multiple values. Sprint names must match exactly as they appear in the import file, **including the date suffix** (e.g. `"2026.07c-Comp Systems 7/29 - 8/11"`, not `"2026.07c-Comp Systems"`). The date suffix is stripped internally for matching against JIRA sprint names.
 
-The future sprint analysis section also identifies stories in JIRA that no longer appear in the import file (removed from scope) and stories whose sprint assignments differ between JIRA and the import — and applies sprint changes automatically.
+When a Work ID is not found in the queried sprint(s), the script searches the full project — including the backlog and all other sprints — before declaring it `MISSING`. Stories found outside the target sprint are reported as `IN JIRA (sprint name)` or `IN JIRA ((backlog))` so you can decide whether to move them rather than create duplicates.
+
+The future sprint analysis section identifies stories in JIRA that no longer appear in the import file (removed from scope) and stories whose sprint assignments differ between JIRA and the import. Sprint changes are reported as `PENDING` by default — pass `--apply` to write them to JIRA.
 
 ---
 
@@ -374,27 +378,51 @@ python3 scripts/8_weekly_status_report.py \
 | `--drive-folder` | No | `$DRIVE_FOLDER` | Google Drive folder ID (shown in placeholder when Drive unavailable) |
 | `--output` | No | `reports/{PROJECT}_LeadershipStatusReport_YYYY-MM-DD.html` | Output HTML path |
 | `--today` | No | system date | Override today's date (YYYY-MM-DD) |
+| `--week-start` | No | Monday of current week | Override the reporting week start date (YYYY-MM-DD); messages outside `[week-start, today]` are excluded |
 
 **Executive summary file format:** Plain text, paragraphs separated by blank lines. Each paragraph becomes its own `<p>` block in the report.
 
 **Notes file format:** One message per line in the format `[YYYY-MM-DD] Author: message text`. Claude saves Slack and Drive content in this format automatically.
 
-**Highlights extraction:** Messages are keyword-matched into three groups — Key Accomplishments, Risks & Concerns, and Issues & Action Items. The section includes a disclaimer to review for accuracy before sharing. When a Drive folder is configured but no notes file is present, a placeholder note is shown with instructions to add Drive data for future runs.
+**Highlights extraction:** Messages are filtered to the current reporting week (Monday through today) before keyword matching — messages from prior weeks are excluded even if they appear in the notes file. The three groups — Key Accomplishments, Risks & Concerns, and Issues & Action Items — are derived by keyword matching within that window. The section header shows the exact date range covered (e.g. `Aug 17 – Aug 21`). The section includes a disclaimer to review for accuracy before sharing. When a Drive folder is configured but no notes file is present, a placeholder note is shown with instructions to add Drive data for future runs. Use `--week-start` to override the week start date if the default Monday calculation is not the desired window.
+
+**Risk assessment model:** The report uses an *effective progress* metric to determine sprint health, not just raw closed count:
+
+- **Closed** stories count as full credit (1.0).
+- **Near-done** stories (`Ready for Test`, `Ready for Demo`, `In Test`) count as half-credit (0.5) — they are late in the workflow and expected to close quickly per the Definition of Done.
+- **In Progress with a future due date** counts as quarter-credit (0.25) — active work that is not yet overdue.
+- **Blocked / On Hold** stories are flagged HIGH risk and shown in the risk register.
+- The sprint is flagged `AT RISK` (red critical banner) only when effective progress lags time elapsed by more than 15 percentage points.
+
+| Status | Credit | Risk badge | Row highlight |
+|---|---|---|---|
+| `Closed` | 1.0 | — | Green background |
+| `Ready for Test` / `Ready for Demo` / `In Test` | 0.5 | NEAR DONE (green) | Normal |
+| `In Progress` with future due date | 0.25 | IN PROGRESS (blue) | Normal |
+| `In Progress` past due / `Open` / `Ready for Implementation` | 0 | ON TRACK (grey) | Normal or red if past-due |
+| `Blocked` / `On Hold` | 0 | HIGH (red) | Orange background |
+| Past-due open (any non-closed, non-blocked) | 0 | HIGH (red) | Red background |
+
+**Editable executive summary:** The Executive Summary section in the generated HTML is `contenteditable` — click to edit directly in the browser. A toolbar provides:
+- **💾 Save to File** — downloads the edited text as a `.txt` file (preserving paragraph breaks), ready to use as `--summary` on the next run
+- **📋 Copy Text** — copies plain text to the clipboard for pasting into email or Slack
+- **↩ Reset** — reverts to the original generated text (with confirmation prompt)
+- An **Unsaved changes** indicator appears in orange as soon as you begin typing
 
 Report sections generated:
 
 | Section | Source |
 |---|---|
 | Header + sprint metadata | Active sprint from JIRA Agile API |
-| Critical banner | Auto — shown if closed% lags elapsed% by >15 points |
-| Summary cards | Story counts from sprint issues |
-| Executive Summary | `--summary` file (PM-authored) |
+| Critical banner | Auto — shown if effective progress lags elapsed% by >15 points |
+| Summary cards (4) | Sprint Progress (effective %), Blocked/On Hold count, Near Done count, Closed count |
+| Executive Summary | `--summary` file (PM-authored); editable in browser with Save/Copy/Reset toolbar |
 | Accomplishments | All Closed stories in the sprint |
 | Team Communications Highlights | Keyword-extracted from Slack + Drive notes (when provided) |
-| Issue Register | All sprint stories with status badges and row highlights |
-| Sprint Burn bars | Time elapsed vs. stories closed vs. expected pace |
+| Issue Register | All sprint stories with status badges, risk badges, and row highlights |
+| Sprint Burn bars | Time elapsed · Stories Closed · Near Done · In Progress · Effective Progress · Expected at Pace · Blocked/On Hold |
 | Team Workload bars | Open story count per assignee |
-| Risk Register | Auto-populated from Blocked stories and past-due open stories |
+| Risk Register | Auto-populated from Blocked/On Hold stories and past-due open stories |
 | Footer | Sprint name and report date |
 
 Note: Only User Stories and Bugs are analyzed; Tasks and Sub-tasks are excluded.

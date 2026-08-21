@@ -6,12 +6,16 @@ Compares Work IDs in an import file vs JIRA story summaries and creates
 missing stories matching specified filters (status, sprint).
 
 Usage:
+    # Create only User Story Complete stories (default):
+    python3 3_create_stories.py --file import.xls --project IGSIFP --board 18086
+
+    # Create stories of any status (e.g. New Request, Development):
     python3 3_create_stories.py --file import.xls --project IGSIFP --board 18086 \
-        --status "User Story Complete" --future-only
+        --status ""
 
 Requirements:
     - import file must be HTML-formatted .xls with standard columns
-    - Assignees are looked up by name; unknown assignees fall back to default
+    - Assignees are looked up by name; unknown assignees fall back to $JIRA_DEFAULT_ASSIGNEE
 """
 
 import argparse
