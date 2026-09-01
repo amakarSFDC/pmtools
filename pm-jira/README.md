@@ -127,8 +127,24 @@ python3 scripts/3_create_stories.py \
 | `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
 | `--default-assignee` | No | `$JIRA_DEFAULT_ASSIGNEE` | JIRA account ID fallback when assignee lookup fails |
 | `--status` | No | `User Story Complete` | Only create stories matching this import status; pass `--status ""` to create stories of any status |
+| `--issue-type` | No | `Story` | JIRA issue type to create (e.g. `Task` for non-story work like SOP documentation) |
+| `--story-points` | No | from import | Override story points for all created issues (e.g. `0` for Tasks that should not count toward sprint velocity) |
 | `--future-only` | No | off | Only create stories in future-dated sprints |
 | `--today` | No | system date | Override today's date (YYYY-MM-DD) for future sprint filtering |
+
+**Creating Tasks instead of Stories:** Use `--issue-type Task --story-points 0` when adding non-development work items (e.g. SOP documentation, deployment prep tasks) that should appear on the board but not count toward sprint velocity. Example:
+
+```bash
+python3 scripts/3_create_stories.py \
+  --file data/import.xls \
+  --project IGSIFP \
+  --board 18086 \
+  --email "$JIRA_EMAIL" \
+  --token "$JIRA_API_TOKEN" \
+  --status "User Story Complete" \
+  --issue-type Task \
+  --story-points 0
+```
 
 Field mapping:
 
@@ -372,7 +388,7 @@ python3 scripts/8_weekly_status_report.py \
 | `--email` | Yes | — | Atlassian email |
 | `--token` | Yes | — | Atlassian API token |
 | `--base-url` | No | `$JIRA_BASE_URL` | JIRA base URL |
-| `--summary` | No | — | Path to plain-text executive summary file |
+| `--summary` | No | auto-detect `data/executive_summary_YYYY-MM-DD.txt`, else auto-generated | Path to plain-text executive summary file. If omitted, auto-detects today's dated file; if that's also missing/empty, a summary is auto-generated from current sprint metrics and previous-sprint velocity |
 | `--slack-notes` | No | auto-detect `data/slack_notes_YYYY-MM-DD.txt` | Path to pre-saved Slack messages file |
 | `--drive-notes` | No | auto-detect `data/standup_notes_YYYY-MM-DD.txt` | Path to pre-saved Google Drive standup notes file |
 | `--drive-folder` | No | `$DRIVE_FOLDER` | Google Drive folder ID (shown in placeholder when Drive unavailable) |
@@ -381,6 +397,10 @@ python3 scripts/8_weekly_status_report.py \
 | `--week-start` | No | Monday of current week | Override the reporting week start date (YYYY-MM-DD); messages outside `[week-start, today]` are excluded |
 
 **Executive summary file format:** Plain text, paragraphs separated by blank lines. Each paragraph becomes its own `<p>` block in the report.
+
+**Auto-generated executive summary:** Every run always ships with a written executive summary — never a blank placeholder. If `--summary` is omitted, not found, or empty, the script writes one automatically from the current sprint's progress/risk data and the previous sprint's velocity: a status paragraph (on track/at risk, stories closed, effective progress), a risk paragraph (blocked/on-hold/past-due stories, or a clean bill of health), and a velocity paragraph (see below). The result is still editable/saveable in the browser like a PM-authored one.
+
+**Previous Sprint — Velocity vs Commitment:** The most recently closed sprint on the board is always fetched — story points committed (all Story/Bug issues that were in the sprint) vs completed (`Closed` only) — and shown both as its own report section with a burn bar and as the final paragraph of the executive summary. This gives leadership a rolling look at whether the team is meeting its sprint commitments, independent of the current sprint's in-flight progress.
 
 **Notes file format:** One message per line in the format `[YYYY-MM-DD] Author: message text`. Claude saves Slack and Drive content in this format automatically.
 
@@ -403,11 +423,14 @@ python3 scripts/8_weekly_status_report.py \
 | `Blocked` / `On Hold` | 0 | HIGH (red) | Orange background |
 | Past-due open (any non-closed, non-blocked) | 0 | HIGH (red) | Red background |
 
-**Editable executive summary:** The Executive Summary section in the generated HTML is `contenteditable` — click to edit directly in the browser. A toolbar provides:
-- **💾 Save to File** — downloads the edited text as a `.txt` file (preserving paragraph breaks), ready to use as `--summary` on the next run
+**Editable executive summary:** The Executive Summary section in the generated HTML has a toolbar:
+- **✏️ Edit** — toggles the summary block into edit mode (click again, now labeled "✓ Done Editing", to lock it back down)
+- **💾 Save** — in Chrome/Edge (File System Access API), the first Save opens a file picker: choose/create `data/executive_summary_YYYY-MM-DD.txt` for today's date. Every Save after that (including after closing and reopening the report, as long as it's the same browser/profile) writes straight back to that same file with no dialog. In Safari/Firefox (no File System Access API), Save instead downloads `executive_summary_YYYY-MM-DD.txt` — move/overwrite it into `data/` yourself.
 - **📋 Copy Text** — copies plain text to the clipboard for pasting into email or Slack
 - **↩ Reset** — reverts to the original generated text (with confirmation prompt)
 - An **Unsaved changes** indicator appears in orange as soon as you begin typing
+
+**Reloading edits:** Since the filename is date-stamped to match the report's date and Script 8 auto-detects `data/executive_summary_YYYY-MM-DD.txt` for that same date, rerunning Script 8 for the same day picks up your saved edits automatically — no `--summary` flag needed.
 
 Report sections generated:
 

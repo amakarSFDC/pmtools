@@ -1,0 +1,25 @@
+# ── Credentials ──────────────────────────────────────────────────────────────
+# Never commit real credentials. salesforce.env is a safe template (placeholder
+# values only) and IS tracked. Any filled-in copies must be listed here.
+# Note: this project has no actual secrets — `sf` stores OAuth tokens itself in
+# ~/.sfdx/ — but we still git-ignore local copies to match the pm-jira convention.
+*.env.local
+*.env.secret
+.env
+.env.*
+!config/salesforce.env
+
+# ── Project data ──────────────────────────────────────────────────────────────
+# Report/query output may contain internal Salesforce data — keep off public repo
+data/
+
+# ── Generated reports ─────────────────────────────────────────────────────────
+reports/
+
+# ── OS / editor noise ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+__pycache__/
+*.pyc

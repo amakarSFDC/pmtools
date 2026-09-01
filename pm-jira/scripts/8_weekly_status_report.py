@@ -16,7 +16,16 @@ Risk model — effective progress (used for at-risk determination):
   Sprint flagged AT RISK when: elapsed% - effective% > 15
 
 Executive summary is rendered as a contenteditable block in the HTML
-output with Save (download .txt), Copy, and Reset buttons.
+output with Save (download .txt), Copy, and Reset buttons. When --summary
+is not passed (or the file is missing), a summary is auto-generated from
+the current sprint's progress/risk data and the previous sprint's velocity
+vs commitment — the report always ships with a written executive summary,
+never a blank placeholder.
+
+Previous Sprint — Velocity vs Commitment: the most recently closed sprint
+on the board is always fetched and compared — story points committed vs
+completed (customfield_10047) — and rendered both as its own report
+section and as a paragraph in the auto-generated executive summary.
 
 Workflow for Slack/Drive integration:
   1. Have Claude read Slack channel C06PHK1DPH7 and save to
@@ -48,6 +57,7 @@ from datetime import date, datetime, timedelta
 
 base_url_DEFAULT = os.environ.get('JIRA_BASE_URL', 'https://salesforce.atlassian.net')
 DRIVE_FOLDER_DEFAULT  = os.environ.get('DRIVE_FOLDER', '')
+FIELD_STORY_POINTS = 'customfield_10047'
 
 STATUS_BADGE = {
     'Closed':                  ('badge-green',  'Closed'),
@@ -149,20 +159,115 @@ def bar(label, pct, color, detail, detail_color=None):
       </div>'''
 
 
+def render_summary_paragraphs(raw_text):
+    paragraphs = [p.strip() for p in raw_text.split('\n\n') if p.strip()]
+    html = ''
+    for i, p in enumerate(paragraphs):
+        mb = 'margin-bottom:14px;' if i < len(paragraphs) - 1 else ''
+        html += f'<p style="font-size:14px;line-height:1.9;color:#1a1a2e;{mb}">{p}</p>\n    '
+    return html
+
+
 def read_executive_summary(path):
+    """Read a PM-authored summary file. Returns rendered HTML, or None if not
+    provided/found/empty — callers should fall back to auto-generation."""
     if not path:
-        return '<p style="font-size:14px;line-height:1.9;color:#1a1a2e;">[Executive summary not provided. Pass --summary to include one.]</p>'
+        return None
     try:
         with open(path, encoding='utf-8') as f:
             raw = f.read()
-        paragraphs = [p.strip() for p in raw.split('\n\n') if p.strip()]
-        html = ''
-        for i, p in enumerate(paragraphs):
-            mb = 'margin-bottom:14px;' if i < len(paragraphs) - 1 else ''
-            html += f'<p style="font-size:14px;line-height:1.9;color:#1a1a2e;{mb}">{p}</p>\n    '
-        return html
+        if not raw.strip():
+            return None
+        return render_summary_paragraphs(raw)
     except FileNotFoundError:
-        return f'<p style="font-size:14px;color:#c0392b;">[Summary file not found: {path}]</p>'
+        print(f'  WARN: Summary file not found: {path} — auto-generating summary instead.')
+        return None
+
+
+def generate_exec_summary_text(sprint_name, start_fmt, end_fmt, elapsed_pct, effective_pct,
+                                at_risk, total, closed, near_done, blocked, in_progress_future,
+                                past_due, prev_velocity):
+    """Auto-generate an executive summary paragraph set from current sprint
+    metrics plus the previous sprint's velocity vs commitment. Used whenever
+    a PM-authored --summary file is not provided."""
+    closed_pct = round(len(closed) / total * 100) if total else 0
+    status_word = 'AT RISK' if at_risk else 'on track'
+
+    p1 = (f'Sprint {sprint_name} ({start_fmt}–{end_fmt}) is currently {status_word}. '
+          f'As of today, the team has closed {len(closed)} of {total} committed stories '
+          f'({closed_pct}%), with {elapsed_pct}% of the sprint elapsed and effective progress '
+          f'(weighting near-done and in-progress work) at {effective_pct}%.')
+    if near_done or in_progress_future:
+        p1 += (f' {len(near_done)} additional story(ies) are near-done and '
+               f'{len(in_progress_future)} are in progress with a future due date.')
+    paragraphs = [p1]
+
+    risk_items = list(blocked) + [i for i in past_due if i not in blocked]
+    if risk_items:
+        keys = ', '.join(i['key'] for i in risk_items[:6])
+        more = f' and {len(risk_items) - 6} more' if len(risk_items) > 6 else ''
+        p2 = (f'{len(risk_items)} story(ies) carry delivery risk into sprint close: {keys}{more}. '
+              f'{len(blocked)} are Blocked/On Hold and '
+              f'{len([i for i in past_due if i not in blocked])} are open past their due date. '
+              f'Recommend confirming owners and resolution timelines this week.')
+        paragraphs.append(p2)
+    else:
+        paragraphs.append('No stories are currently blocked, on hold, or past due.')
+
+    if prev_velocity:
+        pv = prev_velocity
+        pct = pv['completion_pct']
+        gap_word = 'met' if pct >= 95 else 'fell short of' if pct < 80 else 'came close to'
+        p3 = (f'The previous sprint, {pv["sprint_name"]}, {gap_word} its commitment: the team '
+              f'completed {pv["completed_points"]:g} of {pv["committed_points"]:g} committed story '
+              f'points ({pct}%), closing {pv["closed_stories"]} of {pv["total_stories"]} stories.')
+        paragraphs.append(p3)
+
+    return '\n\n'.join(paragraphs)
+
+
+def fetch_previous_sprint(creds, base_url, board):
+    """Return the most recently closed sprint on the board, or None."""
+    resp = api(creds, 'GET', f'{base_url}/rest/agile/1.0/board/{board}/sprint?state=closed&maxResults=200')
+    closed_sprints = [s for s in resp.get('values', []) if s.get('endDate')]
+    if not closed_sprints:
+        return None
+    closed_sprints.sort(key=lambda s: s['endDate'], reverse=True)
+    return closed_sprints[0]
+
+
+def fetch_sprint_velocity(creds, base_url, sprint):
+    """Fetch Story/Bug issues for a closed sprint and compute committed vs
+    completed story points. 'Committed' is the story points on issues that
+    were in the sprint when it closed (as recorded by JIRA); it does not
+    reconstruct issues removed from the sprint before closure."""
+    issues = []
+    start_at = 0
+    while True:
+        resp = api(creds, 'GET',
+            f"{base_url}/rest/agile/1.0/sprint/{sprint['id']}/issue"
+            f'?startAt={start_at}&maxResults=100&fields=status,issuetype,{FIELD_STORY_POINTS}')
+        batch = resp.get('issues', [])
+        if not batch:
+            break
+        issues.extend(batch)
+        start_at += len(batch)
+        if start_at >= resp.get('total', 0):
+            break
+
+    story_bugs = [i for i in issues if i['fields']['issuetype']['name'] in ('Story', 'Bug')]
+    closed = [i for i in story_bugs if i['fields']['status']['name'] == 'Closed']
+    committed_points = sum(i['fields'].get(FIELD_STORY_POINTS) or 0 for i in story_bugs)
+    completed_points = sum(i['fields'].get(FIELD_STORY_POINTS) or 0 for i in closed)
+
+    return {
+        'sprint_name':      sprint['name'],
+        'total_stories':    len(story_bugs),
+        'closed_stories':   len(closed),
+        'committed_points': committed_points,
+        'completed_points': completed_points,
+        'completion_pct':   round(completed_points / committed_points * 100) if committed_points else 0,
+    }
 
 
 def read_notes_file(path):
@@ -306,7 +411,30 @@ def build_highlights_html(slack_messages, drive_messages, drive_folder, week_sta
   </div>'''
 
 
-def generate_html(sprint, issues, exec_summary, today, highlights_html='', project='', project_name=''):
+def build_velocity_html(prev_velocity):
+    """Build HTML for the Previous Sprint — Velocity vs Commitment section."""
+    if not prev_velocity:
+        return '''
+  <div class="section-block">
+    <div class="section-title">Previous Sprint — Velocity vs Commitment</div>
+    <p style="font-size:12px;color:#888;">No closed sprint found on this board yet.</p>
+  </div>'''
+
+    pv  = prev_velocity
+    pct = pv['completion_pct']
+    color = '#27ae60' if pct >= 95 else '#e67e22' if pct >= 80 else '#c0392b'
+    bars = bar('Story Points', pct, color,
+               f"{pv['completed_points']:g} of {pv['committed_points']:g} pts", color)
+    return f'''
+  <div class="section-block">
+    <div class="section-title">Previous Sprint — Velocity vs Commitment</div>
+    <p style="font-size:12px;color:#555;margin-bottom:16px;">{pv['sprint_name']} · {pv['closed_stories']} of {pv['total_stories']} stories closed.</p>
+    {bars}
+  </div>'''
+
+
+def generate_html(sprint, issues, exec_summary, today, highlights_html='', project='', project_name='',
+                   velocity_html='', prev_velocity=None):
     # ── Sprint metadata ────────────────────────────────────────────────────────
     sprint_name  = sprint.get('name', 'Unknown Sprint')
     start_str    = sprint.get('startDate', '')[:10]
@@ -356,6 +484,14 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
         dd = (i['fields'].get('duedate') or '')[:10]
         if dd and date.fromisoformat(dd) < today:
             past_due.append(i)
+
+    # ── Executive summary: use PM-authored text if provided, else auto-generate ─
+    if exec_summary is None:
+        auto_text = generate_exec_summary_text(
+            sprint_name, start_fmt, end_fmt, elapsed_pct, effective_pct, at_risk,
+            total, closed, near_done, blocked, in_progress_future, past_due, prev_velocity,
+        )
+        exec_summary = render_summary_paragraphs(auto_text)
 
     # ── Row style helper ──────────────────────────────────────────────────────
     def row_class(issue):
@@ -413,6 +549,14 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
   .footer { background: #1b263b; color: #7f9ab5; font-size: 11px; padding: 16px 40px; margin-top: 8px; display: flex; justify-content: space-between; }
   .late-row td { background: #fff8f8; }
   .blocked-row td { background: #fff8f0; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { background: #263d5c; }
+  th.sortable::after { content: ' ⇅'; font-size: 10px; opacity: 0.5; }
+  th.sort-asc::after  { content: ' ▲'; opacity: 1; }
+  th.sort-desc::after { content: ' ▼'; opacity: 1; }
+  .reg-filter-row td { padding: 6px 8px; background: #f5f7fa; border-bottom: 2px solid #dde2ea; }
+  .reg-filter-row input { width: 100%; box-sizing: border-box; padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; }
+  .reg-filter-row input:focus { outline: none; border-color: #1b263b; }
   ul.bullet { margin: 8px 0 0 16px; }
   ul.bullet li { font-size: 12px; color: #444; line-height: 1.7; }
   @media (max-width: 900px) { .card-grid { grid-template-columns: repeat(2,1fr); } .two-col { grid-template-columns: 1fr; } }
@@ -423,10 +567,11 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
   .exec-toolbar button.primary:hover { background: #0d1b2a; }
   .exec-toolbar .exec-status { font-size: 11px; color: #888; margin-left: 4px; }
   .exec-editable { outline: none; border: 2px dashed transparent; border-radius: 6px; padding: 8px; transition: border-color 0.2s, background 0.2s; min-height: 60px; }
-  .exec-editable:focus { border-color: #415a77; background: #f8fafc; }
+  .exec-editable.editing { border-color: #415a77; background: #f8fafc; }
   .exec-editable p { font-size: 14px; line-height: 1.9; color: #1a1a2e; margin-bottom: 14px; }
   .exec-editable p:last-child { margin-bottom: 0; }
   .exec-edit-hint { font-size: 11px; color: #aaa; margin-top: 8px; }
+  .exec-toolbar button.editing { background: #415a77; color: #fff; border-color: #415a77; }
 '''
 
     # ── Issue register rows ───────────────────────────────────────────────────
@@ -585,13 +730,14 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
   <div class="section-block">
     <div class="section-title">Executive Summary</div>
     <div class="exec-toolbar">
-      <button class="primary" onclick="saveExec()">💾 Save to File</button>
+      <button class="primary" id="edit-btn" onclick="toggleEdit()">✏️ Edit</button>
+      <button onclick="saveExec()">💾 Save</button>
       <button onclick="copyExec()">📋 Copy Text</button>
       <button onclick="resetExec()">↩ Reset</button>
       <span class="exec-status" id="exec-status"></span>
     </div>
-    <div class="exec-editable" id="exec-body" contenteditable="true">{exec_summary}</div>
-    <div class="exec-edit-hint">Click anywhere in the summary to edit. Use Save to download your changes as a .txt file.</div>
+    <div class="exec-editable" id="exec-body" contenteditable="false">{exec_summary}</div>
+    <div class="exec-edit-hint">Click Edit, make your changes, then Save. The first Save asks you to choose a file — pick (or create) <code>data/executive_summary_{today}.txt</code> in this project. Every Save after that writes straight back to the same file, no dialog. Rerun this script (no <code>--summary</code> flag needed — it auto-detects that file) to regenerate the report with your edits.</div>
   </div>
 
   <div class="section-block">
@@ -601,22 +747,32 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
     </ul>
   </div>
 
+{velocity_html}
+
 {highlights_html}
 
   <div class="section-block">
     <div class="section-title">Sprint Issue Register</div>
-    <table>
+    <table id="issue-register">
       <thead>
         <tr>
-          <th style="width:100px">Key</th>
-          <th>Summary</th>
-          <th style="width:150px">Assignee</th>
-          <th style="width:80px">Due Date</th>
-          <th style="width:130px">Status</th>
-          <th style="width:100px">Risk</th>
+          <th class="sortable" style="width:100px" data-col="0">Key</th>
+          <th class="sortable" data-col="1">Summary</th>
+          <th class="sortable" style="width:150px" data-col="2">Assignee</th>
+          <th class="sortable" style="width:80px" data-col="3">Due Date</th>
+          <th class="sortable" style="width:130px" data-col="4">Status</th>
+          <th class="sortable" style="width:100px" data-col="5">Risk</th>
+        </tr>
+        <tr class="reg-filter-row" id="reg-filter-row">
+          <td><input type="text" placeholder="Key…"      oninput="filterRegister()" data-col="0"></td>
+          <td><input type="text" placeholder="Summary…"  oninput="filterRegister()" data-col="1"></td>
+          <td><input type="text" placeholder="Assignee…" oninput="filterRegister()" data-col="2"></td>
+          <td><input type="text" placeholder="Date…"     oninput="filterRegister()" data-col="3"></td>
+          <td><input type="text" placeholder="Status…"   oninput="filterRegister()" data-col="4"></td>
+          <td><input type="text" placeholder="Risk…"     oninput="filterRegister()" data-col="5"></td>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="issue-register-body">
 {issue_rows}
       </tbody>
     </table>
@@ -662,36 +818,112 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
 </div>
 
 <script>
-  const ORIGINAL_HTML = document.getElementById('exec-body').innerHTML;
+  const ORIGINAL_HTML     = document.getElementById('exec-body').innerHTML;
+  const SUMMARY_FILENAME  = 'executive_summary_{today}.txt';
+  const HAS_FS_ACCESS     = 'showSaveFilePicker' in window;
+  let   fileHandle        = null;
 
   function setStatus(msg, color) {{
     const s = document.getElementById('exec-status');
     s.textContent = msg;
     s.style.color = color || '#888';
-    if (msg) setTimeout(() => {{ if (s.textContent === msg) s.textContent = ''; }}, 3000);
+    if (msg) setTimeout(() => {{ if (s.textContent === msg) s.textContent = ''; }}, 5000);
   }}
 
-  function saveExec() {{
+  function toggleEdit() {{
+    const el  = document.getElementById('exec-body');
+    const btn = document.getElementById('edit-btn');
+    const editing = el.getAttribute('contenteditable') === 'true';
+    el.setAttribute('contenteditable', editing ? 'false' : 'true');
+    el.classList.toggle('editing', !editing);
+    btn.classList.toggle('editing', !editing);
+    btn.textContent = editing ? '✏️ Edit' : '✓ Done Editing';
+    if (!editing) el.focus();
+  }}
+
+  function execText() {{
     const el = document.getElementById('exec-body');
-    // Convert <p> tags back to plain paragraphs separated by blank lines
     let text = '';
     el.querySelectorAll('p').forEach(p => {{ text += p.innerText.trim() + '\\n\\n'; }});
     if (!text.trim()) text = el.innerText.trim();
-    const blob = new Blob([text.trim()], {{ type: 'text/plain' }});
+    return text.trim();
+  }}
+
+  // Remember the picked file handle across page reloads (Chrome/Edge only —
+  // the File System Access API isn't available in Safari/Firefox, which fall
+  // back to a plain download below).
+  function openHandleDB() {{
+    return new Promise((resolve, reject) => {{
+      const req = indexedDB.open('exec-summary-handles', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('handles');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror   = () => reject(req.error);
+    }});
+  }}
+
+  async function storeHandle(handle) {{
+    try {{
+      const db = await openHandleDB();
+      db.transaction('handles', 'readwrite').objectStore('handles').put(handle, 'execSummary');
+    }} catch (e) {{ /* best effort — Save still works this session without persistence */ }}
+  }}
+
+  async function loadStoredHandle() {{
+    try {{
+      const db = await openHandleDB();
+      return await new Promise((resolve) => {{
+        const req = db.transaction('handles', 'readonly').objectStore('handles').get('execSummary');
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror   = () => resolve(null);
+      }});
+    }} catch (e) {{ return null; }}
+  }}
+
+  async function ensurePermission(handle) {{
+    try {{
+      if ((await handle.queryPermission({{ mode: 'readwrite' }})) === 'granted') return true;
+      return (await handle.requestPermission({{ mode: 'readwrite' }})) === 'granted';
+    }} catch (e) {{ return false; }}
+  }}
+
+  async function saveExec() {{
+    const text = execText();
+
+    if (HAS_FS_ACCESS) {{
+      try {{
+        if (!fileHandle) fileHandle = await loadStoredHandle();
+        if (fileHandle && !(await ensurePermission(fileHandle))) fileHandle = null;
+        if (!fileHandle) {{
+          fileHandle = await window.showSaveFilePicker({{
+            suggestedName: SUMMARY_FILENAME,
+            types: [{{ description: 'Text file', accept: {{ 'text/plain': ['.txt'] }} }}],
+          }});
+          await storeHandle(fileHandle);
+        }}
+        const writable = await fileHandle.createWritable();
+        await writable.write(text);
+        await writable.close();
+        setStatus(`Saved to ${{fileHandle.name}} — rerun the report script to reload with these edits.`, '#27ae60');
+        return;
+      }} catch (e) {{
+        if (e.name === 'AbortError') {{ setStatus('Save cancelled.', '#888'); return; }}
+        console.warn('File System Access save failed, falling back to download:', e);
+      }}
+    }}
+
+    // Fallback (Safari/Firefox): downloads the file — move/overwrite it into
+    // data/ yourself, then rerun the script to pick it up.
+    const blob = new Blob([text], {{ type: 'text/plain' }});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'executive_summary_{today}.txt';
+    a.download = SUMMARY_FILENAME;
     a.click();
     URL.revokeObjectURL(a.href);
-    setStatus('Saved!', '#27ae60');
+    setStatus(`Downloaded ${{SUMMARY_FILENAME}} — move it into data/ (overwrite), then rerun the script.`, '#e67e22');
   }}
 
   function copyExec() {{
-    const el = document.getElementById('exec-body');
-    let text = '';
-    el.querySelectorAll('p').forEach(p => {{ text += p.innerText.trim() + '\\n\\n'; }});
-    if (!text.trim()) text = el.innerText.trim();
-    navigator.clipboard.writeText(text.trim()).then(
+    navigator.clipboard.writeText(execText()).then(
       () => setStatus('Copied to clipboard!', '#27ae60'),
       () => setStatus('Copy failed — select text manually.', '#c0392b')
     );
@@ -707,6 +939,49 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
   // Auto-mark edited state
   document.getElementById('exec-body').addEventListener('input', () => {{
     setStatus('Unsaved changes', '#e67e22');
+  }});
+
+  // ── Issue Register: sort & filter ─────────────────────────────────────────
+  let regSortCol = -1, regSortAsc = true;
+
+  function cellText(row, col) {{
+    return (row.cells[col] ? row.cells[col].innerText : '').trim();
+  }}
+
+  function sortRegister(colIndex) {{
+    const tbody = document.getElementById('issue-register-body');
+    const ths = document.querySelectorAll('#issue-register thead tr:first-child th');
+    if (regSortCol === colIndex) {{
+      regSortAsc = !regSortAsc;
+    }} else {{
+      regSortCol = colIndex;
+      regSortAsc = true;
+    }}
+    ths.forEach((th, i) => {{
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (i === colIndex) th.classList.add(regSortAsc ? 'sort-asc' : 'sort-desc');
+    }});
+    const rows = Array.from(tbody.rows);
+    rows.sort((a, b) => {{
+      const av = cellText(a, colIndex).toLowerCase();
+      const bv = cellText(b, colIndex).toLowerCase();
+      return regSortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+    }});
+    rows.forEach(r => tbody.appendChild(r));
+  }}
+
+  function filterRegister() {{
+    const filters = Array.from(document.querySelectorAll('#reg-filter-row input'))
+      .map(inp => inp.value.trim().toLowerCase());
+    const tbody = document.getElementById('issue-register-body');
+    Array.from(tbody.rows).forEach(row => {{
+      const match = filters.every((f, i) => !f || cellText(row, i).toLowerCase().includes(f));
+      row.style.display = match ? '' : 'none';
+    }});
+  }}
+
+  document.querySelectorAll('#issue-register thead tr:first-child th.sortable').forEach(th => {{
+    th.addEventListener('click', () => sortRegister(parseInt(th.dataset.col)));
   }});
 </script>
 
@@ -809,9 +1084,31 @@ def main():
         week_start=week_start, week_end=today,
     )
 
-    exec_summary = read_executive_summary(args.summary)
+    # Previous sprint velocity vs commitment — always fetched: feeds both its
+    # own report section and the auto-generated executive summary fallback.
+    print('Fetching previous sprint velocity...')
+    prev_sprint = fetch_previous_sprint(creds, base_url, args.board)
+    prev_velocity = fetch_sprint_velocity(creds, base_url, prev_sprint) if prev_sprint else None
+    if prev_velocity:
+        print(f"  {prev_velocity['sprint_name']}: {prev_velocity['completed_points']:g} of "
+              f"{prev_velocity['committed_points']:g} pts ({prev_velocity['completion_pct']}%)")
+    else:
+        print('  No closed sprint found.')
+    velocity_html = build_velocity_html(prev_velocity)
+
+    summary_path = args.summary
+    if not summary_path:
+        auto_summary = f'data/executive_summary_{today}.txt'
+        if os.path.exists(auto_summary):
+            print(f'Auto-detected executive summary: {auto_summary}')
+            summary_path = auto_summary
+
+    exec_summary = read_executive_summary(summary_path)
+    if exec_summary is None:
+        print('No executive summary file provided — auto-generating from sprint + velocity data.')
     html = generate_html(sprint, issues, exec_summary, today, highlights_html,
-                         project=args.project, project_name=args.project_name or '')
+                         project=args.project, project_name=args.project_name or '',
+                         velocity_html=velocity_html, prev_velocity=prev_velocity)
 
     with open(output, 'w', encoding='utf-8') as f:
         f.write(html)

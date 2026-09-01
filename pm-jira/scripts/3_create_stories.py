@@ -149,6 +149,8 @@ def main():
     parser.add_argument('--base-url',          default=base_url_DEFAULT, help='JIRA base URL (default: $JIRA_BASE_URL)')
     parser.add_argument('--default-assignee',  default=DEFAULT_ASSIGNEE_FALLBACK, help='JIRA account ID to assign when lookup fails (default: $JIRA_DEFAULT_ASSIGNEE)')
     parser.add_argument('--status',            default='User Story Complete', help='Filter: only create stories with this import status')
+    parser.add_argument('--issue-type',        default='Story',              help='JIRA issue type to create (default: Story; use "Task" for non-story work)')
+    parser.add_argument('--story-points',      default=None,                 help='Override story points for all created issues (e.g. 0 for Tasks)')
     parser.add_argument('--future-only',       action='store_true',         help='Only create stories in future-dated sprints')
     parser.add_argument('--today',             default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
     args = parser.parse_args()
@@ -255,17 +257,24 @@ def main():
         except ValueError:
             story_points = None
 
+        # Allow --story-points override (e.g. 0 for Tasks)
+        if args.story_points is not None:
+            try:
+                story_points = float(args.story_points)
+            except ValueError:
+                pass
+
         fields = {
             'project':   {'key': args.project},
-            'issuetype': {'name': 'Story'},
+            'issuetype': {'name': args.issue_type},
             'summary':   summary,
             'description': make_doc(description),
         }
         if assignee_id:
             fields['assignee'] = {'accountId': assignee_id}
-        if ac:            fields[FIELD_ACCEPTANCE]   = make_doc(ac)
-        if due_date:      fields['duedate']           = due_date
-        if story_points:  fields[FIELD_STORY_POINTS]  = story_points
+        if ac:                                fields[FIELD_ACCEPTANCE]  = make_doc(ac)
+        if due_date:                          fields['duedate']          = due_date
+        if story_points is not None:          fields[FIELD_STORY_POINTS] = story_points
 
         # If the target sprint is active, send to backlog with label instead
         active_scope = sprint_id in active_sprint_ids
