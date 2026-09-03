@@ -16,7 +16,7 @@ All scripts require your JIRA credentials passed as arguments or set as environm
 | `JIRA_BASE_URL` | `--base-url` | Your Atlassian domain (e.g. `https://yourcompany.atlassian.net`) |
 | `JIRA_DEFAULT_ASSIGNEE` | `--default-assignee` | JIRA account ID to use when assignee lookup fails (Script 3 only) |
 | `SLACK_CHANNEL` | `--slack-channel` | Slack channel ID for posting results (Scripts 8, 9) |
-| `DRIVE_FOLDER` | `--drive-folder` | Google Drive folder ID for standup notes (Script 8 only) |
+| `DRIVE_FOLDER` | `--drive-folder` | Google Drive folder ID for meeting minutes (Script 8 only) |
 
 Copy the template and fill in your values:
 
@@ -217,6 +217,11 @@ with flagged cells in yellow and an Actions Required column.
 
 Sprint defaults to the **active sprint** when `--sprint` is omitted.
 
+`--file` accepts either the standard HTML-formatted `.xls` GUS export, or a plain `.csv`
+(e.g. produced by `pm-salesforce`'s `1_run_report.py`) — detected by file extension. CSV
+exports have no `Sprint Name` column, so the Sprint Mismatch check is skipped for rows
+sourced from a `.csv` file; all other checks run the same.
+
 ```bash
 # Active sprint (default):
 python3 scripts/5_identify_source_file_updates.py \
@@ -356,7 +361,10 @@ Drive standup notes.
 **Workflow for Slack/Drive integration:**
 
 1. Have Claude read Slack channel C06PHK1DPH7 and save messages to `data/slack_notes_YYYY-MM-DD.txt`
-2. (Optional) Have Claude read Google Drive standup notes folder `10zqzHGYSjehzJAgUUPX0VOF2cykB10jC` and save to `data/standup_notes_YYYY-MM-DD.txt`
+2. (Optional) Have Claude read the Google Drive meeting minutes folder (`$DRIVE_FOLDER`,
+   [link](https://drive.google.com/drive/folders/0B2qIQ8DT2kcMfmZGanktZS1aakVMekpiYXU3SG5hc0hGdFVlNWJrQ0xwWnFid0FfeUlHQnM?resourcekey=0--DVqFUtIcKaUWR1w2kD5Ag))
+   and save to `data/standup_notes_YYYY-MM-DD.txt`. Files in that folder are named
+   "SPIFF Dev Team Daily Stand Up \<date\>" — one per stand-up.
 3. Pass the saved files to the script via `--slack-notes` and/or `--drive-notes`
 
 The script also **auto-detects** notes files named `data/slack_notes_YYYY-MM-DD.txt` and `data/standup_notes_YYYY-MM-DD.txt` matching today's date, so the flags can be omitted when files are in place.
@@ -438,12 +446,12 @@ Report sections generated:
 |---|---|
 | Header + sprint metadata | Active sprint from JIRA Agile API |
 | Critical banner | Auto — shown if effective progress lags elapsed% by >15 points |
-| Summary cards (4) | Sprint Progress (effective %), Blocked/On Hold count, Near Done count, Closed count |
+| Summary cards (5) | Sprint Progress (effective %), Blocked/On Hold count, Near Done count, Closed count, Story Points (closed/committed) |
 | Executive Summary | `--summary` file (PM-authored); editable in browser with Save/Copy/Reset toolbar |
 | Accomplishments | All Closed stories in the sprint |
 | Team Communications Highlights | Keyword-extracted from Slack + Drive notes (when provided) |
 | Issue Register | All sprint stories with status badges, risk badges, and row highlights |
-| Sprint Burn bars | Time elapsed · Stories Closed · Near Done · In Progress · Effective Progress · Expected at Pace · Blocked/On Hold |
+| Sprint Burn bars | Time elapsed · Stories Closed · Story Points · Near Done · In Progress · Effective Progress · Expected at Pace · Blocked/On Hold |
 | Team Workload bars | Open story count per assignee |
 | Risk Register | Auto-populated from Blocked/On Hold stories and past-due open stories |
 | Footer | Sprint name and report date |

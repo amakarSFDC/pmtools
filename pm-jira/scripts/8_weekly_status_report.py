@@ -30,8 +30,10 @@ section and as a paragraph in the auto-generated executive summary.
 Workflow for Slack/Drive integration:
   1. Have Claude read Slack channel C06PHK1DPH7 and save to
      data/slack_notes_YYYY-MM-DD.txt (Claude MCP → file).
-  2. Optionally have Claude read Google Drive standup notes folder and save to
-     data/standup_notes_YYYY-MM-DD.txt (when Drive network is available).
+  2. Optionally have Claude read the Google Drive meeting minutes folder
+     ($DRIVE_FOLDER) and save to data/standup_notes_YYYY-MM-DD.txt (when Drive
+     network is available). Files in that folder are named
+     "SPIFF Dev Team Daily Stand Up <date>" — one per stand-up.
   3. Pass the saved files to this script via --slack-notes and --drive-notes.
      Auto-detected if files named data/slack_notes_YYYY-MM-DD.txt /
      data/standup_notes_YYYY-MM-DD.txt exist for today's date.
@@ -357,6 +359,7 @@ def build_highlights_html(slack_messages, drive_messages, drive_folder, week_sta
     <div class="note-box" style="margin-top:14px;margin-bottom:0;">
       <strong>Google Drive Standup Notes</strong>
       Drive folder <code>{drive_folder}</code> configured but not yet read for this report.
+      Files in that folder are named "SPIFF Dev Team Daily Stand Up &lt;date&gt;" — one per stand-up.
       When network is available, have Claude read the folder and save to <code>data/standup_notes_YYYY-MM-DD.txt</code>,
       then rerun with <code>--drive-notes data/standup_notes_YYYY-MM-DD.txt</code>.
     </div>'''
@@ -449,6 +452,8 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
     # ── Story metrics ──────────────────────────────────────────────────────────
     total       = len(issues)
     closed      = [i for i in issues if i['fields']['status']['name'] == 'Closed']
+    committed_points = sum(i['fields'].get(FIELD_STORY_POINTS) or 0 for i in issues)
+    closed_points    = sum(i['fields'].get(FIELD_STORY_POINTS) or 0 for i in closed)
     near_done   = [i for i in issues if i['fields']['status']['name'] in NEAR_DONE_STATUSES]
     blocked     = [i for i in issues if i['fields']['status']['name'] in ('Blocked', 'On Hold')]
     open_issues = [i for i in issues if i['fields']['status']['name'] not in ('Closed',)]
@@ -515,7 +520,7 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
   .critical-banner { background: #c0392b; color: #fff; padding: 14px 40px; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 12px; }
   .content { padding: 28px 40px; max-width: 1280px; margin: 0 auto; }
   .section-title { font-size: 15px; font-weight: 700; color: #0d1b2a; margin-bottom: 14px; padding-bottom: 6px; border-bottom: 2px solid #415a77; text-transform: uppercase; letter-spacing: 0.5px; }
-  .card-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 28px; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 28px; }
   .card { background: #fff; border-radius: 8px; padding: 18px 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); border-left: 4px solid #ccc; }
   .card.red    { border-left-color: #c0392b; }
   .card.orange { border-left-color: #e67e22; }
@@ -604,6 +609,9 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
     burn_color   = '#e67e22' if at_risk else '#27ae60'
     burn_bars    = bar('Time Elapsed',      elapsed_pct,   '#415a77', f'Day {elapsed_days} of {total_days}')
     burn_bars   += bar('Stories Closed',    closed_pct,    burn_color, f'{len(closed)} of {total}',
+                       '#e67e22' if at_risk else '#27ae60')
+    points_pct   = round(closed_points / committed_points * 100) if committed_points else 0
+    burn_bars   += bar('Story Points',      points_pct,    burn_color, f'{closed_points:g} of {committed_points:g}',
                        '#e67e22' if at_risk else '#27ae60')
     if near_done:
         nd_pct     = round(len(near_done) / total * 100)
@@ -724,6 +732,11 @@ def generate_html(sprint, issues, exec_summary, today, highlights_html='', proje
       <div class="label">Closed This Sprint</div>
       <div class="value">{len(closed)}</div>
       <div class="sub">of {total} committed stories</div>
+    </div>
+    <div class="card green">
+      <div class="label">Story Points</div>
+      <div class="value">{closed_points:g} / {committed_points:g}</div>
+      <div class="sub">closed of committed points</div>
     </div>
   </div>
 
@@ -1036,7 +1049,7 @@ def main():
         resp = api(creds, 'GET',
             f'{base_url}/rest/agile/1.0/sprint/{sprint["id"]}/issue'
             f'?startAt={start_at}&maxResults=100'
-            f'&fields=summary,status,duedate,assignee,customfield_10014,priority,labels,issuetype')
+            f'&fields=summary,status,duedate,assignee,customfield_10014,priority,labels,issuetype,{FIELD_STORY_POINTS}')
         batch = resp.get('issues', [])
         if not batch:
             break

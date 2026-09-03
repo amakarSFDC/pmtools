@@ -17,6 +17,9 @@ Usage:
 Requirements:
     - CSV must have a "Work: Work ID" column and a "Status" column
       (as produced by 1_run_report.py)
+
+Work IDs with a CSV status of "Go-Live" or "Spillover" are excluded entirely (already
+deployed/terminal — not worth reconciling against JIRA).
 """
 
 import argparse
@@ -60,17 +63,26 @@ def main():
     creds = f'{args.email}:{args.token}'
     base_url = args.base_url
 
+    # Statuses that mean the work is already deployed/terminal — excluded from
+    # comparison entirely (not worth reconciling against JIRA).
+    SKIP_STATUSES = {'Go-Live', 'Spillover'}
+
     # Parse CSV
     with open(args.file, newline='', encoding='utf-8') as f:
         reader = list(csv.DictReader(f))
 
     csv_data = {}
+    skipped_wids = set()
     for row in reader:
         wid = (row.get('Work: Work ID') or '').strip()
         if not wid:
             continue
+        status = (row.get('Status') or '').strip()
+        if status in SKIP_STATUSES:
+            skipped_wids.add(wid)
+            continue
         csv_data[wid] = {
-            'status': (row.get('Status') or '').strip(),
+            'status': status,
             'subject': (row.get('Subject') or '').strip(),
         }
 
@@ -107,7 +119,7 @@ def main():
         if not next_token:
             break
 
-    all_wids = sorted(set(list(csv_data.keys()) + list(jira_all.keys())))
+    all_wids = sorted((set(csv_data.keys()) | set(jira_all.keys())) - skipped_wids)
 
     print(f'{"Work ID":<12} {"Subject":<50} {"CSV Status":<25} {"JIRA Key":<12} {"JIRA Status":<20} {"JIRA Sprint":<30} {"Match?"}')
     print('-' * 175)
@@ -142,7 +154,8 @@ def main():
 
     print()
     print(f'Total: {len(all_wids)}  |  Match: {counts["match"]}  |  Mismatch: {counts["mismatch"]}  '
-          f'|  Missing from JIRA: {counts["missing"]}  |  Not in CSV: {counts["not_in_csv"]}')
+          f'|  Missing from JIRA: {counts["missing"]}  |  Not in CSV: {counts["not_in_csv"]}  '
+          f'|  Skipped (Go-Live/Spillover): {len(skipped_wids)}')
 
 
 if __name__ == '__main__':

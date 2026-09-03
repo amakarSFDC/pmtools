@@ -27,10 +27,13 @@ Usage:
         --board 18086 --sprint "2026.07c-Comp Systems" --output report.xls
 
 Requirements:
-    - import file must be HTML-formatted .xls with standard columns
+    - import file must be HTML-formatted .xls with standard columns, or a .csv with the
+      same column names (e.g. produced by pm-salesforce's 1_run_report.py) — .csv exports
+      have no Sprint Name column, so sprint-mismatch checks are skipped for those rows.
 """
 
 import argparse
+import csv
 import os
 import re
 import json
@@ -141,7 +144,7 @@ def write_xls(rows, output_path, sprint_name):
 
     html += '</table>\n'
 
-    with open(output_path, 'w', encoding='iso-8859-1') as f:
+    with open(output_path, 'w', encoding='iso-8859-1', errors='xmlcharrefreplace') as f:
         f.write(html)
     print(f'\nReport saved to: {output_path}')
 
@@ -162,33 +165,52 @@ def main():
     creds = f'{args.email}:{args.token}'
     base_url = args.base_url
 
-    # Parse import file
-    with open(args.file, 'r', encoding='iso-8859-1') as f:
-        content = f.read()
-    p = TableParser()
-    p.feed(content)
-    idx = {col: p.headers.index(col) for col in p.headers}
-
-    def g(row, col):
-        i = idx.get(col, -1)
-        return row[i].strip() if i >= 0 and i < len(row) else ''
-
+    # Parse import file — HTML-formatted .xls, or a plain .csv (e.g. from pm-salesforce)
     import_data = {}
-    for row in p.rows:
-        wid = g(row, 'Work: Work ID')
-        if wid:
-            sp_raw = g(row, 'Story Points - Dev')
-            try:
-                imp_pts = float(sp_raw) if sp_raw else None
-            except ValueError:
-                imp_pts = None
-            import_data[wid] = {
-                'status':   g(row, 'Status'),
-                'deadline': g(row, 'Dev Deadline'),
-                'sprint':   strip_date(g(row, 'Sprint Name')),
-                'assignee': g(row, 'Assigned To'),
-                'points':   imp_pts,
-            }
+    if args.file.lower().endswith('.csv'):
+        with open(args.file, newline='', encoding='utf-8') as f:
+            for row in csv.DictReader(f):
+                wid = (row.get('Work: Work ID') or '').strip()
+                if not wid:
+                    continue
+                sp_raw = (row.get('Story Points - Dev') or '').strip()
+                try:
+                    imp_pts = float(sp_raw) if sp_raw else None
+                except ValueError:
+                    imp_pts = None
+                import_data[wid] = {
+                    'status':   (row.get('Status') or '').strip(),
+                    'deadline': (row.get('Dev Deadline') or '').strip(),
+                    'sprint':   '',  # .csv exports have no Sprint Name column
+                    'assignee': (row.get('Assigned To') or '').strip(),
+                    'points':   imp_pts,
+                }
+    else:
+        with open(args.file, 'r', encoding='iso-8859-1') as f:
+            content = f.read()
+        p = TableParser()
+        p.feed(content)
+        idx = {col: p.headers.index(col) for col in p.headers}
+
+        def g(row, col):
+            i = idx.get(col, -1)
+            return row[i].strip() if i >= 0 and i < len(row) else ''
+
+        for row in p.rows:
+            wid = g(row, 'Work: Work ID')
+            if wid:
+                sp_raw = g(row, 'Story Points - Dev')
+                try:
+                    imp_pts = float(sp_raw) if sp_raw else None
+                except ValueError:
+                    imp_pts = None
+                import_data[wid] = {
+                    'status':   g(row, 'Status'),
+                    'deadline': g(row, 'Dev Deadline'),
+                    'sprint':   strip_date(g(row, 'Sprint Name')),
+                    'assignee': g(row, 'Assigned To'),
+                    'points':   imp_pts,
+                }
 
     # Find sprint ID
     sprint_data = api(creds, 'GET',

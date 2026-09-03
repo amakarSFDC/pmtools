@@ -114,6 +114,10 @@ Output columns: Work ID, Subject, CSV Status, JIRA Key, JIRA Status, JIRA Sprint
 vocabulary differences like `User Story Complete` vs `Open` always show as `NO`), `MISSING`
 (Work ID not found in JIRA), or `NOT IN CSV` (JIRA ticket not present in the report export).
 
+Work IDs with a CSV status of `Go-Live` or `Spillover` are excluded entirely (already
+deployed/terminal — not worth reconciling against JIRA); the excluded count is reported in
+the summary line.
+
 ## Project layout
 
 ```
