@@ -1,0 +1,11 @@
+# ── Output ───────────────────────────────────────────────────────────────────
+# Digests may contain internal channel content — keep off public repo.
+data/
+
+# ── OS / editor noise ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+__pycache__/
+*.pyc

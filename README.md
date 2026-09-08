@@ -9,6 +9,7 @@ Personal PM/engineering automation scripts, tracked at
 |---|---|
 | [`pm-jira/`](pm-jira/README.md) | Sync a GUS/Salesforce export with a JIRA project — sprints, fix versions, stories, comparison reports, weekly leadership status report |
 | [`pm-salesforce/`](pm-salesforce/README.md) | Read Salesforce (`hui`) reports/SOQL and create/update records via the `sf` CLI |
+| [`icymi/`](icymi/README.md) | Weekly "In Case You Missed It" digest of a fixed list of Slack channels |
 | `timeline/` | Standalone timeline/presentation generator |
 
 Each project folder has its own `README.md`, `config/` template, and git-ignored
