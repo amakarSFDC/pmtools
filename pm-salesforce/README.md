@@ -146,3 +146,19 @@ reports/   # git-ignored — generated report exports
 - **Wrong org / instance URL** — if `hui`'s login host isn't the standard
   `https://hui.my.salesforce.com`, update `SF_INSTANCE_URL` in `config/salesforce.env.local`
   and re-run `setup_auth.sh`.
+- **"Dev Deadline is required before setting to 'Development'"** — `agf__ADM_Work__c` requires
+  `Dev_Deadline__c` (date, no `agf__` prefix) to already be populated before `agf__Status__c`
+  can move to `Development`. Set it first:
+  ```bash
+  python3 scripts/4_update_record.py --sobject agf__ADM_Work__c --where "Name='W-XXXXXX'" \
+    --values "Dev_Deadline__c=2026-09-22" --apply
+  ```
+- **"Environment must be populated if Status is not User Story Complete"** — `agf__Environment__c`
+  is a multipicklist that must have a value once status leaves `User Story Complete`. List valid
+  values with `sf sobject describe --sobject agf__ADM_Work__c --target-org hui --json | jq -r '.result.fields[] | select(.name=="agf__Environment__c") | .picklistValues[].value'`,
+  then set it (quote the value if it contains spaces/dashes — the `sf` CLI's `key=value` parser
+  splits on unquoted spaces):
+  ```bash
+  python3 scripts/4_update_record.py --sobject agf__ADM_Work__c --where "Name='W-XXXXXX'" \
+    --values 'agf__Environment__c="Spiff - Sandbox"' --apply
+  ```

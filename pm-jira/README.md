@@ -119,7 +119,7 @@ python3 scripts/3_create_stories.py \
 
 | Argument | Required | Default | Description |
 |---|---|---|---|
-| `--file` | No | `data/import.xls` | Path to import file |
+| `--file` | No | `data/import.xls` | Path to import file — HTML `.xls`, or a plain `.csv` (e.g. from `pm-salesforce`'s `1_run_report.py`), detected by extension |
 | `--project` | Yes | — | JIRA project key |
 | `--board` | Yes | — | JIRA board ID |
 | `--email` | Yes | — | Atlassian email |
@@ -131,6 +131,17 @@ python3 scripts/3_create_stories.py \
 | `--story-points` | No | from import | Override story points for all created issues (e.g. `0` for Tasks that should not count toward sprint velocity) |
 | `--future-only` | No | off | Only create stories in future-dated sprints |
 | `--today` | No | system date | Override today's date (YYYY-MM-DD) for future sprint filtering |
+| `--sprint` | Only with `.csv` | — | Sprint base name (e.g. `"2026.09a-Comp Systems"`) applied to every row — `.csv` exports have no Sprint Name column, so this is required when `--file` is a `.csv` |
+
+**Using a `.csv` input:** `.csv` exports (e.g. from `pm-salesforce`'s `1_run_report.py`) have no `Sprint Name` column, so every row is created into the single sprint passed via `--sprint`:
+
+```bash
+python3 scripts/3_create_stories.py \
+  --file ../pm-salesforce/reports/PS_Scope_Extract_2026-09-10.csv \
+  --project IGSIFP --board 18086 \
+  --email "$JIRA_EMAIL" --token "$JIRA_API_TOKEN" \
+  --sprint "2026.09a-Comp Systems"
+```
 
 **Creating Tasks instead of Stories:** Use `--issue-type Task --story-points 0` when adding non-development work items (e.g. SOP documentation, deployment prep tasks) that should appear on the board but not count toward sprint velocity. Example:
 

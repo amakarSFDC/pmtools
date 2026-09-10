@@ -14,11 +14,14 @@ Usage:
         --status ""
 
 Requirements:
-    - import file must be HTML-formatted .xls with standard columns
+    - import file must be HTML-formatted .xls with standard columns, or a plain .csv
+      (e.g. produced by pm-salesforce's 1_run_report.py) — detected by file extension.
+      .csv exports have no Sprint Name column, so --sprint is required when using one.
     - Assignees are looked up by name; unknown assignees fall back to $JIRA_DEFAULT_ASSIGNEE
 """
 
 import argparse
+import csv
 import os
 import re
 import json
@@ -153,6 +156,7 @@ def main():
     parser.add_argument('--story-points',      default=None,                 help='Override story points for all created issues (e.g. 0 for Tasks)')
     parser.add_argument('--future-only',       action='store_true',         help='Only create stories in future-dated sprints')
     parser.add_argument('--today',             default=datetime.today().strftime('%Y-%m-%d'), help='Override today date (YYYY-MM-DD)')
+    parser.add_argument('--sprint',            default=None,                 help='Sprint base name (e.g. "2026.09a-Comp Systems") to use for every row — required when --file is a .csv, since those exports have no Sprint Name column')
     args = parser.parse_args()
 
     creds = f'{args.email}:{args.token}'
@@ -160,16 +164,27 @@ def main():
     DEFAULT_ASSIGNEE = args.default_assignee
     today = datetime.strptime(args.today, '%Y-%m-%d')
 
-    # Parse import file
-    with open(args.file, 'r', encoding='iso-8859-1') as f:
-        content = f.read()
-    p = TableParser()
-    p.feed(content)
-    idx = {col: p.headers.index(col) for col in p.headers}
+    # Parse import file — HTML-formatted .xls, or a plain .csv (e.g. from pm-salesforce)
+    is_csv = args.file.lower().endswith('.csv')
+    if is_csv:
+        if not args.sprint:
+            parser.error('--sprint is required when --file is a .csv (no Sprint Name column to read)')
+        with open(args.file, newline='', encoding='utf-8') as f:
+            rows = [dict(row) for row in csv.DictReader(f)]
+            for row in rows:
+                row['Sprint Name'] = args.sprint
+    else:
+        with open(args.file, 'r', encoding='iso-8859-1') as f:
+            content = f.read()
+        p = TableParser()
+        p.feed(content)
+        idx = {col: p.headers.index(col) for col in p.headers}
+        rows = []
+        for raw_row in p.rows:
+            rows.append({col: (raw_row[i].strip() if i < len(raw_row) else '') for col, i in idx.items()})
 
     def g(row, col):
-        i = idx.get(col, -1)
-        return row[i].strip() if i >= 0 and i < len(row) else ''
+        return (row.get(col) or '').strip()
 
     # Fetch existing JIRA issues (work IDs from first 8 chars of summary) — paginated
     jira_work_ids = set()
@@ -198,7 +213,7 @@ def main():
 
     created, failed, skipped = [], [], []
 
-    for row in p.rows:
+    for row in rows:
         wid        = g(row, 'Work: Work ID')
         imp_status = g(row, 'Status')
         sprint_raw = g(row, 'Sprint Name')
