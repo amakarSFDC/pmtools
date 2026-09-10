@@ -238,11 +238,12 @@ def fetch_previous_sprint(creds, base_url, board):
     return closed_sprints[0]
 
 
-def fetch_sprint_velocity(creds, base_url, sprint):
+def fetch_sprint_velocity(creds, base_url, board, sprint):
     """Fetch Story/Bug issues for a closed sprint and compute committed vs
-    completed story points. 'Committed' is the story points on issues that
-    were in the sprint when it closed (as recorded by JIRA); it does not
-    reconstruct issues removed from the sprint before closure."""
+    completed story points. 'Committed' is scoped to issues that were in the
+    sprint when it STARTED — issues added mid-sprint (via JIRA's classic
+    sprint-report endpoint, which is the only source for this) are excluded
+    from committed_points but still count toward completed_points if closed."""
     issues = []
     start_at = 0
     while True:
@@ -257,9 +258,17 @@ def fetch_sprint_velocity(creds, base_url, sprint):
         if start_at >= resp.get('total', 0):
             break
 
+    added_during_sprint = set()
+    report = api(creds, 'GET',
+        f'{base_url}/rest/greenhopper/1.0/rapid/charts/sprintreport'
+        f"?rapidViewId={board}&sprintId={sprint['id']}")
+    if report.get('contents', {}).get('issueKeysAddedDuringSprint'):
+        added_during_sprint = set(report['contents']['issueKeysAddedDuringSprint'].keys())
+
     story_bugs = [i for i in issues if i['fields']['issuetype']['name'] in ('Story', 'Bug')]
     closed = [i for i in story_bugs if i['fields']['status']['name'] == 'Closed']
-    committed_points = sum(i['fields'].get(FIELD_STORY_POINTS) or 0 for i in story_bugs)
+    original_scope = [i for i in story_bugs if i['key'] not in added_during_sprint]
+    committed_points = sum(i['fields'].get(FIELD_STORY_POINTS) or 0 for i in original_scope)
     completed_points = sum(i['fields'].get(FIELD_STORY_POINTS) or 0 for i in closed)
 
     return {
@@ -1101,7 +1110,7 @@ def main():
     # own report section and the auto-generated executive summary fallback.
     print('Fetching previous sprint velocity...')
     prev_sprint = fetch_previous_sprint(creds, base_url, args.board)
-    prev_velocity = fetch_sprint_velocity(creds, base_url, prev_sprint) if prev_sprint else None
+    prev_velocity = fetch_sprint_velocity(creds, base_url, args.board, prev_sprint) if prev_sprint else None
     if prev_velocity:
         print(f"  {prev_velocity['sprint_name']}: {prev_velocity['completed_points']:g} of "
               f"{prev_velocity['committed_points']:g} pts ({prev_velocity['completion_pct']}%)")
